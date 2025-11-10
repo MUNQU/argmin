@@ -38,10 +38,11 @@ use rand_distr::{Cauchy, Distribution, Normal};
 use serde::{Deserialize, Serialize};
 
 /// Strategy for initializing particle positions
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
 #[cfg_attr(feature = "serde1", derive(Serialize, Deserialize))]
 pub enum InitializationStrategy {
     /// Standard uniform random initialization (default)
+    #[default]
     UniformRandom,
     /// Latin Hypercube Sampling - ensures uniform distribution across search space
     LatinHypercube,
@@ -49,17 +50,12 @@ pub enum InitializationStrategy {
     OppositionBased,
 }
 
-impl Default for InitializationStrategy {
-    fn default() -> Self {
-        InitializationStrategy::UniformRandom
-    }
-}
-
 /// Mutation strategy for avoiding local optima
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
 #[cfg_attr(feature = "serde1", derive(Serialize, Deserialize))]
 pub enum MutationStrategy {
     /// No mutation
+    #[default]
     None,
     /// Gaussian mutation with specified standard deviation
     Gaussian(f64),
@@ -67,17 +63,12 @@ pub enum MutationStrategy {
     Cauchy(f64),
 }
 
-impl Default for MutationStrategy {
-    fn default() -> Self {
-        MutationStrategy::None
-    }
-}
-
 /// Determines which particles to apply mutation to
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
 #[cfg_attr(feature = "serde1", derive(Serialize, Deserialize))]
 pub enum MutationApplication {
     /// No mutation application (default)
+    #[default]
     None,
     /// Apply mutation only to the global best particle (most efficient)
     GlobalBestOnly,
@@ -85,12 +76,6 @@ pub enum MutationApplication {
     AllParticles,
     /// Apply mutation only to particles with below-average fitness (balanced approach)
     BelowAverage,
-}
-
-impl Default for MutationApplication {
-    fn default() -> Self {
-        MutationApplication::None
-    }
 }
 
 /// Strategy for controlling acceleration coefficients (cognitive and social factors)
@@ -1589,7 +1574,7 @@ mod tests {
         let res = ParticleSwarm::new((lower_bound.clone(), upper_bound.clone()), 40)
             .with_velocity_clamping(0.2);
         assert!(res.is_ok());
-        
+
         let res = ParticleSwarm::new((lower_bound.clone(), upper_bound.clone()), 40)
             .with_velocity_clamping(1.0);
         assert!(res.is_ok());
