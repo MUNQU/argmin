@@ -491,8 +491,10 @@ where
 fn random_subset(n_items: usize, target_size: usize, seed: u64) -> Subset {
     let mut items: Vec<_> = (0..n_items).collect();
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
-    let _ = items.partial_shuffle(&mut rng, target_size);
-    let mut indices = items[..target_size].to_vec();
+    // `partial_shuffle` leaves the random sample at the end of the slice and
+    // returns it first; the start of the slice is the unshuffled rest.
+    let (sample, _) = items.partial_shuffle(&mut rng, target_size);
+    let mut indices = sample.to_vec();
     indices.sort_unstable();
     Subset {
         indices,
