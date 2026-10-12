@@ -15,7 +15,8 @@ use crate::core::{
     ArgminFloat, CostFunction, Error, IterState, Problem, Solver, State, TerminationReason,
     TerminationStatus, KV,
 };
-use rand::{seq::SliceRandom, Rng, SeedableRng};
+use rand::RngExt;
+use rand::{seq::SliceRandom, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
@@ -490,7 +491,7 @@ where
 fn random_subset(n_items: usize, target_size: usize, seed: u64) -> Subset {
     let mut items: Vec<_> = (0..n_items).collect();
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
-    items.partial_shuffle(&mut rng, target_size);
+    let _ = items.partial_shuffle(&mut rng, target_size);
     let mut indices = items[..target_size].to_vec();
     indices.sort_unstable();
     Subset {

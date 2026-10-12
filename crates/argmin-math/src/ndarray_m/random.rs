@@ -6,6 +6,7 @@
 // copied, modified, or distributed except according to those terms.
 
 use rand::Rng;
+use rand::RngExt;
 
 use crate::ArgminRandom;
 

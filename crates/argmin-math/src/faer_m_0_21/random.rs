@@ -1,6 +1,7 @@
 use crate::ArgminRandom;
 use faer::Mat;
 use rand::distr::uniform::SampleUniform;
+use rand::RngExt;
 
 impl<E: PartialOrd + SampleUniform + Copy> ArgminRandom for Mat<E> {
     fn rand_from_range<R: rand::Rng>(min: &Self, max: &Self, rng: &mut R) -> Self {

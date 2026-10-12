@@ -29,7 +29,7 @@ impl Rosenbrock {
         Rosenbrock {
             lower_bound,
             upper_bound,
-            rng: Arc::new(Mutex::new(Xoshiro256PlusPlus::from_os_rng())),
+            rng: Arc::new(Mutex::new(rand::make_rng::<Xoshiro256PlusPlus>())),
         }
     }
 }
