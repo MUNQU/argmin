@@ -7,6 +7,7 @@
 
 use crate::ArgminRandom;
 use rand::Rng;
+use rand::RngExt;
 
 macro_rules! make_random {
     ($t:ty) => {

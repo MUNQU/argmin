@@ -61,6 +61,7 @@ use crate::core::{
     ArgminFloat, Error, MultiObjectiveCostFunction, PopulationState, Problem, Solver, KV,
 };
 use rand::prelude::*;
+use rand::RngExt;
 #[cfg(feature = "serde1")]
 use serde::{Deserialize, Serialize};
 
@@ -159,7 +160,7 @@ where
             mutation_probability,
             crossover_eta: F::from_f64(20.0).unwrap(),
             mutation_eta: F::from_f64(20.0).unwrap(),
-            rng: StdRng::from_os_rng(),
+            rng: rand::make_rng::<StdRng>(),
         })
     }
 }
@@ -737,7 +738,8 @@ mod tests {
         let solver = NsgaII::<f64>::new(bounds, 100);
         let err = solver.unwrap_err();
         assert!(
-            err.to_string().contains("NSGA-II: invalid bounds at dimension 0: min (5) must be < max (-5)"),
+            err.to_string()
+                .contains("NSGA-II: invalid bounds at dimension 0: min (5) must be < max (-5)"),
             "Expected 'NSGA-II: invalid bounds at dimension 0: min (5) must be < max (-5)' error, 
             got: {}",
             err
@@ -982,7 +984,8 @@ mod tests {
             .run();
         let err = result.unwrap_err();
         assert!(
-            err.to_string().contains("NSGA-II: Objective 0 is not finite (NaN or infinite)"),
+            err.to_string()
+                .contains("NSGA-II: Objective 0 is not finite (NaN or infinite)"),
             "Expected 'NSGA-II: Objective 0 is not finite (NaN or infinite)' error, got: {}",
             err
         );
@@ -1008,7 +1011,7 @@ mod tests {
 
         let mut problem_wrapper = Problem::new(problem);
         let result = solver.init(&mut problem_wrapper, state);
-        
+
         let err = result.unwrap_err();
         assert!(
             err.to_string().contains("NSGA-II: Individual 0 dimension 0 value 10 is outside bounds [-5, 5]"),

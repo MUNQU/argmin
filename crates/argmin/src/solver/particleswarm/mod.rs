@@ -31,7 +31,8 @@ use argmin_math::{
     ArgminAdd, ArgminL2Norm, ArgminMinMax, ArgminMul, ArgminRandom, ArgminSub, ArgminZeroLike,
 };
 #[cfg(feature = "rand")]
-use rand::{Rng, SeedableRng};
+use rand::Rng;
+use rand::RngExt;
 #[cfg(feature = "rand")]
 use rand_distr::{Cauchy, Distribution, Normal};
 #[cfg(feature = "serde1")]
@@ -349,7 +350,7 @@ where
             // Configuration for time-varying strategies
             max_iterations: 1000,
             // Utilities
-            rng_generator: rand::rngs::StdRng::from_os_rng(),
+            rng_generator: rand::make_rng::<rand::rngs::StdRng>(),
         }
     }
 }
@@ -361,7 +362,7 @@ where
 {
     /// Set the random number generator
     ///
-    /// Defaults to `rand::rngs::StdRng::from_os_rng()`
+    /// Defaults to `rand::make_rng::<rand::rngs::StdRng>()`
     ///
     /// # Example
     /// ```
@@ -1379,7 +1380,7 @@ mod tests {
 
     test_trait_impl!(
         particleswarm,
-        ParticleSwarm<Vec<f64>, f64, rand::rngs::StdRng>
+        ParticleSwarm<Vec<f64>, f64, rand_xoshiro::Xoshiro256PlusPlus>
     );
 
     #[test]

@@ -32,7 +32,7 @@ impl Rosenbrock {
         Rosenbrock {
             lower_bound,
             upper_bound,
-            rng: Arc::new(Mutex::new(Xoshiro256PlusPlus::from_os_rng())),
+            rng: Arc::new(Mutex::new(rand::make_rng::<Xoshiro256PlusPlus>())),
         }
     }
 }
@@ -92,7 +92,7 @@ fn run() -> Result<(), Error> {
 
     // Set up simulated annealing solver
     // An alternative random number generator (RNG) can be provided to `new_with_rng`:
-    // SimulatedAnnealing::new_with_rng(temp, Xoshiro256PlusPlus::try_from_os_rng()?)?
+    // SimulatedAnnealing::new_with_rng(temp, Xoshiro256PlusPlus::try_from_rng(&mut rand::rngs::SysRng)?)?
     let solver = SimulatedAnnealing::new(temp)?
         // Optional: Define temperature function (defaults to `SATempFunc::TemperatureFast`)
         .with_temp_func(SATempFunc::Boltzmann)

@@ -201,7 +201,7 @@ where
     pub fn new(initial_temperature: F) -> Result<Self, Error> {
         SimulatedAnnealing::new_with_rng(
             initial_temperature,
-            Xoshiro256PlusPlus::try_from_os_rng()?,
+            Xoshiro256PlusPlus::try_from_rng(&mut rand::rngs::SysRng)?,
         )
     }
 }
@@ -578,7 +578,7 @@ mod tests {
     use crate::core::{test_utils::TestProblem, ArgminError, State};
     use approx::assert_relative_eq;
 
-    test_trait_impl!(sa, SimulatedAnnealing<f64, StdRng>);
+    test_trait_impl!(sa, SimulatedAnnealing<f64, Xoshiro256PlusPlus>);
 
     #[test]
     fn test_new() {
