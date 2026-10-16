@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `NelderMead::init` returns the error of a cost function at a vertex of the
+  initial simplex instead of panicking on it.
+
 ## [argmin-math unreleased]
 
 ### Added

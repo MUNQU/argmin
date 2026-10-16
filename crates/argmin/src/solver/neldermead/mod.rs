@@ -331,9 +331,9 @@ where
         problem: &mut Problem<O>,
         state: IterState<P, (), (), (), (), F>,
     ) -> Result<(IterState<P, (), (), (), (), F>, Option<KV>), Error> {
-        self.params
-            .iter_mut()
-            .for_each(|(p, c)| *c = problem.cost(p).unwrap());
+        for (p, c) in self.params.iter_mut() {
+            *c = problem.cost(p)?;
+        }
 
         self.sort_param_vecs();
 
@@ -716,6 +716,32 @@ mod tests {
             0.7f64.powi(2) + 1.0f64.powi(2),
             epsilon = f64::EPSILON
         );
+    }
+
+    #[test]
+    fn test_init_returns_the_error_of_a_vertex() {
+        struct FailsAboveZero {}
+
+        impl CostFunction for FailsAboveZero {
+            type Param = Vec<f64>;
+            type Output = f64;
+
+            fn cost(&self, p: &Self::Param) -> Result<Self::Output, Error> {
+                if p[0] > 0.0 {
+                    Err(Error::msg(format!("no cost at {}", p[0])))
+                } else {
+                    Ok(p[0].powi(2))
+                }
+            }
+        }
+
+        let params: Vec<Vec<f64>> = vec![vec![-1.0], vec![0.5]];
+        let mut nm: NelderMead<_, f64> = NelderMead::new(params);
+        let state: IterState<Vec<f64>, (), (), (), (), f64> = IterState::new();
+
+        let res = nm.init(&mut Problem::new(FailsAboveZero {}), state);
+
+        assert_eq!(res.unwrap_err().to_string(), "no cost at 0.5");
     }
 
     #[test]
