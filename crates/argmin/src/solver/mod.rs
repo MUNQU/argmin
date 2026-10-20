@@ -16,6 +16,7 @@ pub mod landweber;
 pub mod linesearch;
 pub mod neldermead;
 pub mod newton;
+pub mod newtonroot;
 #[cfg(feature = "rand")]
 pub mod nsgaii;
 #[cfg(feature = "rand")]
