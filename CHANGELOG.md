@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `BoundedProblem` implements `Operator` when the wrapped problem does, and
+  applies it at the bounded values, so that `AugmentedLagrangian` can search
+  inside box bounds through the sine transform.
+
 ### Changed
 
 ### Fixed

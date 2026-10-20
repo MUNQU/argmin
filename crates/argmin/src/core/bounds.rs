@@ -66,7 +66,7 @@
 //! Python, section "Bounds Implementation":
 //! <https://lmfit.github.io/lmfit-py/bounds.html>
 
-use crate::core::{ArgminFloat, CostFunction, Error};
+use crate::core::{ArgminFloat, CostFunction, Error, Operator};
 #[cfg(feature = "serde1")]
 use serde::{Deserialize, Serialize};
 
@@ -268,10 +268,31 @@ where
     }
 }
 
+/// The operator applies at `x = to_x(u)`, as the cost does, so a solver such as
+/// [`AugmentedLagrangian`](`crate::solver::augmentedlagrangian::AugmentedLagrangian`) sees its
+/// constraints at the bounded values.
+impl<C, F> Operator for BoundedProblem<C, F>
+where
+    C: Operator<Param = Vec<F>>,
+    F: ArgminFloat,
+{
+    type Param = Vec<F>;
+    type Output = C::Output;
+
+    fn apply(&self, u: &Self::Param) -> Result<Self::Output, Error> {
+        self.cost.apply(&self.transform.to_x(u))
+    }
+
+    fn parallelize(&self) -> bool {
+        self.cost.parallelize()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{test_utils::TestProblem, ArgminError, Error, Executor, State};
+    use crate::core::{test_utils::TestProblem, ArgminError, Error, Executor, IterState, State};
+    use crate::solver::augmentedlagrangian::AugmentedLagrangian;
     use crate::solver::neldermead::NelderMead;
     use approx::assert_relative_eq;
     use std::f64::consts::FRAC_PI_2;
@@ -429,5 +450,74 @@ mod tests {
         let cost = problem.cost(&vec![0.0, 0.0]).unwrap();
         assert_relative_eq!(cost, 1.0 + 1.0, epsilon = 1e-12);
         assert_eq!(problem.inner().points.lock().unwrap()[0], vec![2.0, -1.0]);
+    }
+
+    /// The operator that returns its parameter.
+    struct Identity {}
+
+    impl Operator for Identity {
+        type Param = Vec<f64>;
+        type Output = Vec<f64>;
+
+        fn apply(&self, x: &Self::Param) -> Result<Self::Output, Error> {
+            Ok(x.clone())
+        }
+    }
+
+    #[test]
+    fn test_bounded_problem_applies_the_operator_at_x() {
+        let transform = SineTransform::new(vec![(0.0, 4.0)]).unwrap();
+        let problem = BoundedProblem::new(Identity {}, transform);
+        assert_eq!(problem.apply(&vec![0.0]).unwrap(), vec![2.0]);
+    }
+
+    /// `(x0 - 3)² + (x1 + 2)²` under `x0 − x1 − 0.5 = 0`.
+    struct Line {}
+
+    impl CostFunction for Line {
+        type Param = Vec<f64>;
+        type Output = f64;
+
+        fn cost(&self, p: &Self::Param) -> Result<Self::Output, Error> {
+            Ok((p[0] - 3.0).powi(2) + (p[1] + 2.0).powi(2))
+        }
+    }
+
+    impl Operator for Line {
+        type Param = Vec<f64>;
+        type Output = Vec<f64>;
+
+        fn apply(&self, p: &Self::Param) -> Result<Self::Output, Error> {
+            Ok(vec![p[0] - p[1] - 0.5])
+        }
+    }
+
+    #[test]
+    fn test_augmented_lagrangian_meets_the_constraint_inside_the_bounds() {
+        let transform = SineTransform::new(vec![(0.0, 1.0), (0.0, 1.0)]).unwrap();
+        let factory = |u: &Vec<f64>| {
+            let simplex = transform.initial_simplex(&transform.to_x(u), 0.1);
+            Ok((
+                NelderMead::new(simplex).with_sd_tolerance(1e-15)?,
+                IterState::new().max_iters(2000),
+            ))
+        };
+        let solver: AugmentedLagrangian<_, Vec<f64>, f64> = AugmentedLagrangian::new(factory)
+            .with_tolerance(1e-8)
+            .unwrap();
+        let u0 = transform.to_u(&[0.5, 0.5]);
+        let problem = BoundedProblem::new(Line {}, transform.clone());
+        let mut result = Executor::new(problem, solver)
+            .configure(|state| state.param(u0).max_iters(50))
+            .run()
+            .unwrap();
+
+        let problem = result.problem.take_problem().unwrap();
+        let best = problem
+            .transform()
+            .to_x(result.state.get_best_param().unwrap());
+        assert_relative_eq!(best[0], 0.75, epsilon = 1e-4);
+        assert_relative_eq!(best[1], 0.25, epsilon = 1e-4);
+        assert!(best.iter().all(|x| (0.0..=1.0).contains(x)), "{best:?}");
     }
 }
