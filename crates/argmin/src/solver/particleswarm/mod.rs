@@ -1598,6 +1598,27 @@ where
     }
 }
 
+/// A particle borrows as its position, so that a solver that reads the best individual of a
+/// [`PopulationState`] as a parameter vector, such as
+/// [`AugmentedLagrangian`](`crate::solver::augmentedlagrangian::AugmentedLagrangian`), can run
+/// [`ParticleSwarm`] as its inner solver.
+///
+/// # Example
+///
+/// ```
+/// # use argmin::solver::particleswarm::Particle;
+/// use std::borrow::Borrow;
+///
+/// let particle: Particle<Vec<f64>, f64> = Particle::new(vec![0.0, 1.4], 12.0, vec![0.1, 0.5]);
+/// let position: &Vec<f64> = particle.borrow();
+/// assert_eq!(position, &vec![0.0, 1.4]);
+/// ```
+impl<T, F> std::borrow::Borrow<T> for Particle<T, F> {
+    fn borrow(&self) -> &T {
+        &self.position
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
