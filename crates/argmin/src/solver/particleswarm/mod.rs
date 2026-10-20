@@ -16,16 +16,24 @@
 //! several optional enhancements including time-varying coefficients, chaotic inertia, multiple
 //! initialization strategies, mutation operators, and velocity control mechanisms.
 //!
+//! A run stops at its maximum number of iterations or a target cost, or, when a stop rule is
+//! set, when the swarm has converged: the best cost stopped improving, or the swarm gathered
+//! around the best position \[1\]. A run that stops by a rule ends with `SolverConverged`.
+//!
 //! For details see [`ParticleSwarm`].
 //!
-//! ## Reference
+//! ## References
 //!
 //! \[0\] Zambrano-Bigiarini, M. et.al. (2013): Standard Particle Swarm Optimisation 2011 at
 //! CEC-2013: A baseline for future PSO improvements. 2013 IEEE Congress on Evolutionary
 //! Computation. <https://doi.org/10.1109/CEC.2013.6557848>
+//!
+//! \[1\] Zielinski, K., & Laur, R. (2007). Stopping criteria for a constrained single-objective
+//! particle swarm optimization algorithm. Informatica, 31(1), 51-59.
 
 use crate::core::{
-    ArgminFloat, CostFunction, Error, PopulationState, Problem, Solver, State, SyncAlias, KV,
+    ArgminFloat, CostFunction, Error, PopulationState, Problem, Solver, State, SyncAlias,
+    TerminationReason, TerminationStatus, KV,
 };
 use argmin_math::{
     ArgminAdd, ArgminL2Norm, ArgminMinMax, ArgminMul, ArgminRandom, ArgminSub, ArgminZeroLike,
@@ -37,6 +45,7 @@ use rand::RngExt;
 use rand_distr::{Cauchy, Distribution, Normal};
 #[cfg(feature = "serde1")]
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 
 /// Strategy for initializing particle positions
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
@@ -137,6 +146,19 @@ impl<F: ArgminFloat> Default for InertiaWeightStrategy<F> {
     }
 }
 
+/// Settings of the improvement stop rule, see
+/// [`with_improvement_stop`](`ParticleSwarm::with_improvement_stop`)
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde1", derive(Serialize, Deserialize))]
+struct ImprovementStop<F> {
+    /// Number of iterations over which the best cost is compared
+    window: u64,
+    /// Absolute tolerance on the improvement
+    tol_abs: F,
+    /// Tolerance on the improvement relative to the best cost
+    tol_rel: F,
+}
+
 /// # Particle Swarm Optimization (PSO)
 ///
 /// Canonical implementation of the particle swarm optimization method as outlined in \[0\], along
@@ -190,6 +212,18 @@ impl<F: ArgminFloat> Default for InertiaWeightStrategy<F> {
 /// [`with_velocity_mutation`](`ParticleSwarm::with_velocity_mutation`) reinitializes near-zero
 /// velocity components to prevent stagnation \[3\].
 ///
+/// ### Stop Rules
+///
+/// By default a run stops only at its maximum number of iterations or a target cost, and ends
+/// with `MaxItersReached` or `TargetCostReached`. Two stop rules, both off by default, stop it
+/// with `SolverConverged` when the swarm has converged:
+/// [`with_improvement_stop`](`ParticleSwarm::with_improvement_stop`) when the best cost improved
+/// by at most a tolerance over a window of iterations, and
+/// [`with_radius_stop`](`ParticleSwarm::with_radius_stop`) when every particle is close to the
+/// best position, relative to the size of the search box \[11\]. The rules draw no random
+/// numbers, so a run with the same seed is the same as without them up to the iteration where
+/// it stops.
+///
 /// ## Requirements on the optimization problem
 ///
 /// The optimization problem is required to implement [`CostFunction`].
@@ -238,6 +272,9 @@ impl<F: ArgminFloat> Default for InertiaWeightStrategy<F> {
 ///
 /// \[10\] Yao, X., Liu, Y., & Lin, G. (1999). Evolutionary programming made faster. IEEE
 /// Transactions on Evolutionary Computation, 3(2), 82-102. <https://doi.org/10.1109/4235.771163>
+///
+/// \[11\] Zielinski, K., & Laur, R. (2007). Stopping criteria for a constrained single-objective
+/// particle swarm optimization algorithm. Informatica, 31(1), 51-59.
 #[derive(Clone)]
 #[cfg_attr(feature = "serde1", derive(Serialize, Deserialize))]
 pub struct ParticleSwarm<P, F, R> {
@@ -274,6 +311,15 @@ pub struct ParticleSwarm<P, F, R> {
     // Configuration for time-varying strategies
     /// Maximum iterations (for time-varying strategies like TVAC)
     max_iterations: usize,
+
+    // Stop rules
+    /// Improvement stop rule (None = disabled)
+    improvement_stop: Option<ImprovementStop<F>>,
+    /// Radius stop rule: tolerance on the swarm radius relative to the size of the search box
+    /// (None = disabled)
+    radius_stop: Option<F>,
+    /// Best costs of the last iterations, for the improvement stop rule
+    best_costs: VecDeque<F>,
 
     // Utilities
     /// Random number generator
@@ -322,6 +368,10 @@ where
     /// **Mutation:**
     /// * [`with_mutation`](`ParticleSwarm::with_mutation`) - Apply Gaussian or Cauchy mutation to particles (default: None)
     ///
+    /// **Stop rules:**
+    /// * [`with_improvement_stop`](`ParticleSwarm::with_improvement_stop`) - Stop when the best cost stops improving (default: None)
+    /// * [`with_radius_stop`](`ParticleSwarm::with_radius_stop`) - Stop when the swarm has gathered around the best position (default: None)
+    ///
     /// # Example
     ///
     /// ```
@@ -349,6 +399,10 @@ where
             mutation_application: MutationApplication::None,
             // Configuration for time-varying strategies
             max_iterations: 1000,
+            // Stop rules
+            improvement_stop: None,
+            radius_stop: None,
+            best_costs: VecDeque::new(),
             // Utilities
             rng_generator: rand::make_rng::<rand::rngs::StdRng>(),
         }
@@ -397,6 +451,10 @@ where
             mutation_application: self.mutation_application,
             // Configuration for time-varying strategies
             max_iterations: self.max_iterations,
+            // Stop rules
+            improvement_stop: self.improvement_stop,
+            radius_stop: self.radius_stop,
+            best_costs: self.best_costs,
             // Utilities
             rng_generator: generator,
         }
@@ -821,6 +879,162 @@ where
         Ok(self)
     }
 
+    /// Stop when the best cost stops improving
+    ///
+    /// The run stops with [`SolverConverged`](`TerminationReason::SolverConverged`) when the best
+    /// cost improved by at most `tol_abs + tol_rel * |best cost|` over the last `window`
+    /// iterations. With both tolerances 0, it stops when the best cost did not improve at all.
+    /// A swarm can stall for some iterations and then improve again, so a short window can stop
+    /// it early.
+    /// Off by default. The rule reads the best costs only: it draws no random numbers, so a run
+    /// is the same as without it up to the iteration where it stops.
+    ///
+    /// # Arguments
+    ///
+    /// * `window` - Number of iterations over which the improvement is measured (must be > 0)
+    /// * `tol_abs` - Absolute tolerance on the improvement (must be >= 0)
+    /// * `tol_rel` - Tolerance on the improvement relative to the best cost (must be >= 0)
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use argmin::solver::particleswarm::ParticleSwarm;
+    /// # use argmin::core::Error;
+    /// # fn main() -> Result<(), Error> {
+    /// # let lower_bound: Vec<f64> = vec![-1.0, -1.0];
+    /// # let upper_bound: Vec<f64> = vec![1.0, 1.0];
+    /// let pso: ParticleSwarm<_, f64, _> =
+    ///     ParticleSwarm::new((lower_bound, upper_bound), 40)
+    ///         .with_improvement_stop(20, 1e-10, 1e-8)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_improvement_stop(
+        mut self,
+        window: u64,
+        tol_abs: F,
+        tol_rel: F,
+    ) -> Result<Self, Error> {
+        if window == 0 {
+            return Err(argmin_error!(
+                InvalidParameter,
+                "`ParticleSwarm`: improvement stop `window` must be > 0."
+            ));
+        }
+        if tol_abs.is_nan() || tol_abs < float!(0.0) {
+            return Err(argmin_error!(
+                InvalidParameter,
+                "`ParticleSwarm`: improvement stop `tol_abs` must be >= 0."
+            ));
+        }
+        if tol_rel.is_nan() || tol_rel < float!(0.0) {
+            return Err(argmin_error!(
+                InvalidParameter,
+                "`ParticleSwarm`: improvement stop `tol_rel` must be >= 0."
+            ));
+        }
+        self.improvement_stop = Some(ImprovementStop {
+            window,
+            tol_abs,
+            tol_rel,
+        });
+        Ok(self)
+    }
+
+    /// Stop when the swarm has gathered around the best position
+    ///
+    /// The run stops with [`SolverConverged`](`TerminationReason::SolverConverged`) when the
+    /// largest distance of a particle's position from the best position, divided by the size of
+    /// the search box (the norm of `upper_bound - lower_bound`), is at most `tol`. This is the
+    /// maximum distance criterion of Zielinski and Laur (2007), relative to the search box.
+    /// Off by default. The rule reads the positions only: it draws no random numbers, so a run
+    /// is the same as without it up to the iteration where it stops.
+    ///
+    /// Mutation and velocity mutation scatter the swarm again, so with them the radius can stay
+    /// above `tol`.
+    ///
+    /// # Arguments
+    ///
+    /// * `tol` - Tolerance on the swarm radius relative to the size of the search box
+    ///   (must be >= 0)
+    ///
+    /// # Reference
+    ///
+    /// Zielinski, K., & Laur, R. (2007). Stopping criteria for a constrained single-objective
+    /// particle swarm optimization algorithm. Informatica, 31(1), 51-59.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use argmin::solver::particleswarm::ParticleSwarm;
+    /// # use argmin::core::Error;
+    /// # fn main() -> Result<(), Error> {
+    /// # let lower_bound: Vec<f64> = vec![-1.0, -1.0];
+    /// # let upper_bound: Vec<f64> = vec![1.0, 1.0];
+    /// let pso: ParticleSwarm<_, f64, _> =
+    ///     ParticleSwarm::new((lower_bound, upper_bound), 40).with_radius_stop(1e-6)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_radius_stop(mut self, tol: F) -> Result<Self, Error> {
+        if tol.is_nan() || tol < float!(0.0) {
+            return Err(argmin_error!(
+                InvalidParameter,
+                "`ParticleSwarm`: radius stop `tol` must be >= 0."
+            ));
+        }
+        self.radius_stop = Some(tol);
+        Ok(self)
+    }
+
+    /// Keep the best cost of an iteration for the improvement stop rule
+    ///
+    /// Keeps the last `window + 1` best costs, so that the oldest one is `window` iterations
+    /// old.
+    fn record_best_cost(&mut self, best_cost: F) {
+        if let Some(stop) = self.improvement_stop {
+            self.best_costs.push_back(best_cost);
+            while self.best_costs.len() as u64 > stop.window + 1 {
+                self.best_costs.pop_front();
+            }
+        }
+    }
+
+    /// Whether the best cost improved by at most the tolerance over the last `window`
+    /// iterations
+    fn improvement_converged(&self) -> bool {
+        let Some(stop) = self.improvement_stop else {
+            return false;
+        };
+        match (self.best_costs.front(), self.best_costs.back()) {
+            (Some(&oldest), Some(&newest)) if self.best_costs.len() as u64 > stop.window => {
+                oldest - newest <= stop.tol_abs + stop.tol_rel * newest.abs()
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether every particle is within `tol` times the size of the search box from the best
+    /// position
+    fn radius_converged(&self, state: &PopulationState<Particle<P, F>, F>) -> bool
+    where
+        P: ArgminL2Norm<F>,
+    {
+        let Some(tol) = self.radius_stop else {
+            return false;
+        };
+        let (Some(best), Some(population)) = (state.get_param(), state.get_population()) else {
+            return false;
+        };
+        let (min, max) = &self.bounds;
+        let box_size = max.sub(min).l2_norm();
+        let radius = population
+            .iter()
+            .map(|p| p.position.sub(&best.position).l2_norm())
+            .fold(float!(0.0), F::max);
+        radius <= tol * box_size
+    }
+
     /// Get current cognitive and social coefficients based on strategy
     fn get_acceleration_coefficients(&mut self, current_iter: u64) -> (F, F) {
         match &mut self.acceleration_strategy {
@@ -1110,6 +1324,9 @@ where
             None => self.initialize_particles(problem)?,
         };
 
+        self.best_costs.clear();
+        self.record_best_cost(particles[0].cost);
+
         Ok((
             state
                 .individual(particles[0].clone())
@@ -1322,6 +1539,8 @@ where
             }
         }
 
+        self.record_best_cost(best_cost);
+
         Ok((
             state
                 .individual(best_particle)
@@ -1329,6 +1548,13 @@ where
                 .population(particles),
             None,
         ))
+    }
+
+    fn terminate(&mut self, state: &PopulationState<Particle<P, F>, F>) -> TerminationStatus {
+        if self.improvement_converged() || self.radius_converged(state) {
+            return TerminationStatus::Terminated(TerminationReason::SolverConverged);
+        }
+        TerminationStatus::NotTerminated
     }
 }
 
@@ -1984,5 +2210,184 @@ mod tests {
             }
             assert_eq!(state.get_cost().to_ne_bytes(), (-3.0f64).to_ne_bytes());
         }
+    }
+    /// The sphere function `Σ xᵢ²`, with its minimum 0 at the origin.
+    struct Sphere {}
+
+    impl CostFunction for Sphere {
+        type Param = Vec<f64>;
+        type Output = f64;
+
+        fn cost(&self, p: &Self::Param) -> Result<Self::Output, Error> {
+            Ok(p.iter().map(|x| x * x).sum())
+        }
+    }
+
+    type SeededSwarm = ParticleSwarm<Vec<f64>, f64, rand_xoshiro::Xoshiro256PlusPlus>;
+
+    /// A swarm of 20 particles in `[-5, 5]²` with a fixed seed.
+    fn seeded_swarm() -> SeededSwarm {
+        use rand::SeedableRng;
+        ParticleSwarm::new((vec![-5.0, -5.0], vec![5.0, 5.0]), 20)
+            .with_rng_generator(rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(42))
+    }
+
+    fn run(pso: SeededSwarm, max_iters: u64) -> PopulationState<Particle<Vec<f64>, f64>, f64> {
+        crate::core::Executor::new(Sphere {}, pso)
+            .configure(|state| state.max_iters(max_iters))
+            .run()
+            .unwrap()
+            .state()
+            .clone()
+    }
+
+    #[test]
+    fn test_improvement_stop_converges_on_the_sphere() {
+        let pso = seeded_swarm()
+            .with_improvement_stop(25, 1e-12, 0.0)
+            .unwrap();
+
+        let state = run(pso, 1000);
+
+        assert_eq!(
+            state.get_termination_reason(),
+            Some(&TerminationReason::SolverConverged)
+        );
+        assert!(state.get_iter() < 1000);
+        assert!(state.get_best_cost() < 1e-10);
+        let best = &state.get_best_param().unwrap().position;
+        assert!(best.iter().all(|x| x.abs() < 1e-4));
+    }
+
+    #[test]
+    fn test_radius_stop_converges_on_the_sphere() {
+        let pso = seeded_swarm().with_radius_stop(1e-6).unwrap();
+
+        let state = run(pso, 1000);
+
+        assert_eq!(
+            state.get_termination_reason(),
+            Some(&TerminationReason::SolverConverged)
+        );
+        assert!(state.get_iter() < 1000);
+        // Every particle is within 1e-6 of the size of the box from the best position.
+        let best = &state.get_best_param().unwrap().position;
+        let box_size = (2.0f64 * 10.0f64.powi(2)).sqrt();
+        for particle in state.get_population().unwrap() {
+            let distance = particle.position.sub(best).l2_norm();
+            assert!(distance <= 1e-6 * box_size);
+        }
+        assert!(best.iter().all(|x| x.abs() < 1e-4));
+    }
+
+    #[test]
+    fn test_no_stop_rule_keeps_the_draws_of_a_seed() {
+        // The values of a run of the solver before the stop rules existed.
+        let state = run(seeded_swarm(), 100);
+
+        assert_eq!(
+            state.get_termination_reason(),
+            Some(&TerminationReason::MaxItersReached)
+        );
+        assert_eq!(
+            state.get_best_param().unwrap().position,
+            vec![2.575009690058768e-7, -9.28136724724378e-7]
+        );
+        assert_eq!(
+            state.get_best_cost().to_ne_bytes(),
+            9.277445288210613e-13f64.to_ne_bytes()
+        );
+        assert_eq!(
+            state.get_population().unwrap()[0].position,
+            vec![1.8787607633398667e-6, -4.1446581531431926e-5]
+        );
+    }
+
+    #[test]
+    fn test_stop_rules_that_do_not_hold_keep_the_draws_of_a_seed() {
+        let pso = seeded_swarm()
+            .with_improvement_stop(1000, 0.0, 0.0)
+            .unwrap()
+            .with_radius_stop(0.0)
+            .unwrap();
+
+        let with_rules = run(pso, 100);
+        let without_rules = run(seeded_swarm(), 100);
+
+        assert_eq!(
+            with_rules.get_termination_reason(),
+            Some(&TerminationReason::MaxItersReached)
+        );
+        assert_eq!(with_rules.get_best_param(), without_rules.get_best_param());
+        assert_eq!(with_rules.get_population(), without_rules.get_population());
+    }
+
+    #[test]
+    fn test_with_improvement_stop() {
+        let lower_bound: Vec<f64> = vec![-1.0, -1.0];
+        let upper_bound: Vec<f64> = vec![1.0, 1.0];
+        let pso = || -> ParticleSwarm<Vec<f64>, f64, _> {
+            ParticleSwarm::new((lower_bound.clone(), upper_bound.clone()), 40)
+        };
+
+        let res = pso().with_improvement_stop(5, 1e-8, 1e-6).unwrap();
+        assert_eq!(
+            res.improvement_stop,
+            Some(ImprovementStop {
+                window: 5,
+                tol_abs: 1e-8,
+                tol_rel: 1e-6
+            })
+        );
+        assert!(pso().with_improvement_stop(1, 0.0, 0.0).is_ok());
+
+        assert_error!(
+            pso().with_improvement_stop(0, 1e-8, 1e-6),
+            ArgminError,
+            "Invalid parameter: \"`ParticleSwarm`: improvement stop `window` must be > 0.\""
+        );
+        assert_error!(
+            pso().with_improvement_stop(5, -1e-8, 1e-6),
+            ArgminError,
+            "Invalid parameter: \"`ParticleSwarm`: improvement stop `tol_abs` must be >= 0.\""
+        );
+        assert_error!(
+            pso().with_improvement_stop(5, 1e-8, -1e-6),
+            ArgminError,
+            "Invalid parameter: \"`ParticleSwarm`: improvement stop `tol_rel` must be >= 0.\""
+        );
+        assert_error!(
+            pso().with_improvement_stop(5, f64::NAN, 1e-6),
+            ArgminError,
+            "Invalid parameter: \"`ParticleSwarm`: improvement stop `tol_abs` must be >= 0.\""
+        );
+    }
+
+    #[test]
+    fn test_with_radius_stop() {
+        let lower_bound: Vec<f64> = vec![-1.0, -1.0];
+        let upper_bound: Vec<f64> = vec![1.0, 1.0];
+        let pso = || -> ParticleSwarm<Vec<f64>, f64, _> {
+            ParticleSwarm::new((lower_bound.clone(), upper_bound.clone()), 40)
+        };
+
+        let res = pso().with_radius_stop(1e-6).unwrap();
+        assert_eq!(res.radius_stop, Some(1e-6));
+        assert!(pso().with_radius_stop(0.0).is_ok());
+
+        for tol in [-1e-6, f64::NAN] {
+            assert_error!(
+                pso().with_radius_stop(tol),
+                ArgminError,
+                "Invalid parameter: \"`ParticleSwarm`: radius stop `tol` must be >= 0.\""
+            );
+        }
+    }
+
+    #[test]
+    fn test_new_has_no_stop_rule() {
+        let pso: ParticleSwarm<Vec<f64>, f64, _> = ParticleSwarm::new((vec![-1.0], vec![1.0]), 40);
+        assert!(pso.improvement_stop.is_none());
+        assert!(pso.radius_stop.is_none());
     }
 }
