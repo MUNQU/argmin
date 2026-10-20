@@ -28,10 +28,14 @@
 //! `-λᵢ` is the derivative of the optimal cost with respect to `bᵢ` when constraint `i` is
 //! `cᵢ(x) = bᵢ`.
 //!
-//! ## Reference
+//! ## References
 //!
 //! Jorge Nocedal and Stephen J. Wright (2006). Numerical Optimization, chapter 17.
 //! Springer. ISBN 0-387-30303-0.
+//!
+//! Ernesto G. Birgin and José Mario Martínez (2020). Complexity and performance of an
+//! Augmented Lagrangian algorithm. Optimization Methods and Software, 35(5), 885-920.
+//! <https://arxiv.org/abs/1907.02401> (the penalty rule and the initial penalty).
 //!
 //! ## Example
 //!
@@ -106,11 +110,17 @@ use std::borrow::Borrow;
 ///    parameter vector `x`,
 /// 2) minimizes `f(x) + λᵀc(x) + (μ/2)·‖c(x)‖²` with it, from that state,
 /// 3) updates the multipliers `λ ← λ + μ·c(x)` at the best parameter vector of the inner run,
-/// 4) multiplies `μ` by a factor (default `10`, configurable via
-///    [`with_penalty_factor`](`AugmentedLagrangian::with_penalty_factor`)) when `‖c(x)‖` is
-///    above the tolerance and did not fall below a fraction (default `0.25`, configurable via
-///    [`with_decrease_ratio`](`AugmentedLagrangian::with_decrease_ratio`)) of its value in the
-///    previous outer iteration.
+/// 4) from the second outer iteration on, multiplies `μ` by a factor `γ` (default `10`,
+///    configurable via [`with_penalty_factor`](`AugmentedLagrangian::with_penalty_factor`))
+///    when `‖c(x)‖₂` did not fall below a fraction `τ` (default `0.5`, configurable via
+///    [`with_decrease_ratio`](`AugmentedLagrangian::with_decrease_ratio`)) of its value at the
+///    previous outer iterate.
+///
+/// The penalty rule is the one of Algencan \[1\]: `μ` never grows in the first outer
+/// iteration, and it is never compared with `c(x₀)`, so a start that is nearly feasible, such
+/// as the solution of a neighbouring problem, does not raise it. Algencan compares the
+/// ∞-norm `‖c(x)‖∞`; this solver compares the 2-norm `‖c(x)‖₂`, which is the same for one
+/// constraint.
 ///
 /// The solver stops when `‖c(x)‖` is at most the tolerance (default `sqrt(EPSILON)`,
 /// configurable via [`with_tolerance`](`AugmentedLagrangian::with_tolerance`)) and the last
@@ -119,10 +129,19 @@ use std::borrow::Borrow;
 /// [`TargetCostReached`](`TerminationReason::TargetCostReached`). Set the maximum number of
 /// outer iterations with the `max_iters` of the state.
 ///
-/// The initial multipliers are zero and the initial `μ` is `10`. A sequence of nearby
-/// problems starts each one from the multipliers and `μ` of the previous one with
-/// [`with_multipliers`](`AugmentedLagrangian::with_multipliers`) and
-/// [`with_penalty`](`AugmentedLagrangian::with_penalty`).
+/// The initial multipliers are zero. The initial `μ` is the one of Algencan \[1\],
+///
+/// `μ₀ = 10·max{1, |f(x₀)| / max{1, ½‖c(x₀)‖₂²}}`,
+///
+/// so that it follows the scale of the cost; set it with
+/// [`with_penalty`](`AugmentedLagrangian::with_penalty`). `μ₀` should match the scale of `f`
+/// and `c`: a small `μ` needs more outer iterations, a large one makes the augmented cost hard
+/// for the inner solver and the multipliers less accurate.
+///
+/// A sequence of nearby problems, such as the points of a profile, starts each one from the
+/// solution and the multipliers of the previous one with
+/// [`with_multipliers`](`AugmentedLagrangian::with_multipliers`). Passing the previous `μ` with
+/// [`with_penalty`](`AugmentedLagrangian::with_penalty`) is optional.
 ///
 /// ## The inner solver
 ///
@@ -136,8 +155,11 @@ use std::borrow::Borrow;
 /// The next point is the best parameter vector of the inner state, or what it borrows as: a
 /// [`Particle`](`crate::solver::particleswarm::Particle`) of
 /// [`ParticleSwarm`](`crate::solver::particleswarm::ParticleSwarm`) borrows as its position.
-/// A particle swarm stops only at its `max_iters`, so its runs never converge, and the solver
-/// then stops only at its own `max_iters`.
+/// A particle swarm run converges only when it has a stop rule, such as
+/// [`with_radius_stop`](`crate::solver::particleswarm::ParticleSwarm::with_radius_stop`) or
+/// [`with_improvement_stop`](`crate::solver::particleswarm::ParticleSwarm::with_improvement_stop`);
+/// without one it ends at its `max_iters`, and the solver then stops only at its own
+/// `max_iters`.
 ///
 /// An error of the factory or of an inner run stops the solver. The error keeps the original
 /// one as its cause and names the outer iteration that failed.
@@ -156,10 +178,14 @@ use std::borrow::Borrow;
 /// The optimization problem is required to implement [`CostFunction`] (the cost `f(x)`) and
 /// [`Operator`] (the constraint values `c(x)`, one value per constraint).
 ///
-/// ## Reference
+/// ## References
 ///
-/// Jorge Nocedal and Stephen J. Wright (2006). Numerical Optimization, chapter 17.
+/// \[0\] Jorge Nocedal and Stephen J. Wright (2006). Numerical Optimization, chapter 17.
 /// Springer. ISBN 0-387-30303-0.
+///
+/// \[1\] Ernesto G. Birgin and José Mario Martínez (2020). Complexity and performance of an
+/// Augmented Lagrangian algorithm. Optimization Methods and Software, 35(5), 885-920.
+/// <https://arxiv.org/abs/1907.02401> (Algorithm 2.1 and its implementation section).
 #[derive(Clone)]
 #[cfg_attr(feature = "serde1", derive(Serialize, Deserialize))]
 pub struct AugmentedLagrangian<B, M, F> {
@@ -167,8 +193,8 @@ pub struct AugmentedLagrangian<B, M, F> {
     factory: B,
     /// Initial Lagrange multipliers
     multipliers: Option<M>,
-    /// Initial penalty weight
-    penalty: F,
+    /// Initial penalty weight (None = the scaled default of Algencan)
+    penalty: Option<F>,
     /// Factor by which the penalty weight grows
     penalty_factor: F,
     /// Fraction by which the constraint norm must fall in an outer iteration
@@ -197,9 +223,9 @@ where
         AugmentedLagrangian {
             factory,
             multipliers: None,
-            penalty: float!(10.0),
+            penalty: None,
             penalty_factor: float!(10.0),
-            decrease_ratio: float!(0.25),
+            decrease_ratio: float!(0.5),
             tolerance: F::epsilon().sqrt(),
         }
     }
@@ -253,7 +279,8 @@ where
 
     /// Set the initial penalty weight `μ`
     ///
-    /// Must be larger than 0 and defaults to 10.
+    /// Must be larger than 0. Defaults to the initial penalty of Algencan,
+    /// `10·max{1, |f(x₀)| / max{1, ½‖c(x₀)‖₂²}}`, computed at the initial parameter vector.
     ///
     /// # Example
     ///
@@ -274,7 +301,7 @@ where
                 "`AugmentedLagrangian`: penalty must be > 0."
             ));
         }
-        self.penalty = penalty;
+        self.penalty = Some(penalty);
         Ok(self)
     }
 
@@ -305,10 +332,11 @@ where
         Ok(self)
     }
 
-    /// Set the fraction of its previous value that `‖c(x)‖` must fall below in an outer
-    /// iteration, or `μ` grows
+    /// Set the fraction `τ` of its value at the previous outer iterate that `‖c(x)‖₂` must fall
+    /// below in an outer iteration, or `μ` grows
     ///
-    /// Must be in `(0, 1)` and defaults to 0.25.
+    /// Must be in `(0, 1)` and defaults to 0.5, as in Algencan. The first outer iteration never
+    /// grows `μ`.
     ///
     /// # Example
     ///
@@ -403,11 +431,20 @@ where
             .multipliers
             .clone()
             .unwrap_or_else(|| constraints.zero_like());
+        let penalty = self.penalty.unwrap_or_else(|| {
+            // Algencan: μ₀ = 10·max{1, |f(x₀)| / max{1, ½‖c(x₀)‖₂²}}
+            let half_squared_norm = float!(0.5) * constraints.dot(&constraints);
+            float!(10.0)
+                * F::max(
+                    float!(1.0),
+                    cost.abs() / F::max(float!(1.0), half_squared_norm),
+                )
+        });
         let mut state = state.param(param).cost(cost);
         state.constraint_norm = constraints.l2_norm();
         state.constraints = Some(constraints);
         state.multipliers = Some(multipliers);
-        state.penalty = self.penalty;
+        state.penalty = penalty;
         Ok((state, None))
     }
 
@@ -491,13 +528,14 @@ where
         let constraints = problem.apply(&param)?;
         let constraint_norm = constraints.l2_norm();
         let multipliers = multipliers.scaled_add(&penalty, &constraints);
-        let penalty = if constraint_norm > self.tolerance
-            && constraint_norm > self.decrease_ratio * prev_constraint_norm
-        {
-            penalty * self.penalty_factor
-        } else {
-            penalty
-        };
+        // Algencan: μ never grows in the first outer iteration, and from then on only when
+        // ‖c‖ did not fall below a fraction of its value at the previous outer iterate.
+        let penalty =
+            if outer_iter > 0 && constraint_norm > self.decrease_ratio * prev_constraint_norm {
+                penalty * self.penalty_factor
+            } else {
+                penalty
+            };
 
         let mut state = state.param(param).cost(cost);
         state.constraints = Some(constraints);
@@ -643,54 +681,145 @@ mod tests {
     }
 
     #[test]
-    fn test_warm_start_from_a_neighbour_takes_fewer_outer_iterations() {
+    fn test_feasible_start_with_the_right_multiplier_keeps_the_penalty() {
         let solver = AugmentedLagrangian::new(nelder_mead)
-            .with_tolerance(1e-6)
+            .with_tolerance(1e-8)
+            .unwrap()
+            .with_multipliers(vec![-1.0]);
+
+        let res = Executor::new(Circle { b: 1.0 }, solver)
+            .configure(|state| state.param(vec![0.5, 0.5]).max_iters(50))
+            .run()
+            .unwrap();
+
+        let state = res.state();
+        assert_eq!(
+            state.get_termination_reason(),
+            Some(&crate::core::TerminationReason::SolverConverged)
+        );
+        // μ₀ = 10·max{1, 0.5 / max{1, 0}} = 10 at (0.5, 0.5).
+        assert_eq!(state.get_penalty().to_ne_bytes(), 10.0f64.to_ne_bytes());
+        assert_relative_eq!(state.get_multipliers().unwrap()[0], -1.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_warm_step_to_a_neighbour_converges_to_its_multiplier() {
+        let solver = AugmentedLagrangian::new(nelder_mead)
+            .with_tolerance(1e-8)
             .unwrap();
         let neighbour = Executor::new(Circle { b: 1.0 }, solver)
             .configure(|state| state.param(vec![0.0, 0.0]).max_iters(50))
             .run()
             .unwrap();
-        // Both solves start from the same point and penalty weight, so that only the
-        // multipliers differ.
         let neighbour = neighbour.state();
-        let multipliers = neighbour.get_multipliers().unwrap().clone();
-        let penalty = neighbour.get_penalty();
 
-        let solve = |solver: AugmentedLagrangian<_, Vec<f64>, f64>| {
-            Executor::new(Circle { b: 1.01 }, solver)
-                .configure(|state| state.param(vec![0.0, 0.0]).max_iters(50))
+        let solver = AugmentedLagrangian::new(nelder_mead)
+            .with_tolerance(1e-8)
+            .unwrap()
+            .with_multipliers(neighbour.get_multipliers().unwrap().clone());
+        let res = Executor::new(Circle { b: 1.05 }, solver)
+            .configure(|state| {
+                state
+                    .param(neighbour.get_best_param().unwrap().clone())
+                    .max_iters(50)
+            })
+            .run()
+            .unwrap();
+
+        assert_eq!(
+            res.state().get_termination_reason(),
+            Some(&crate::core::TerminationReason::SolverConverged)
+        );
+        assert_relative_eq!(
+            res.state().get_multipliers().unwrap()[0],
+            -1.05,
+            epsilon = 1e-6
+        );
+    }
+
+    #[test]
+    fn test_profile_with_secant_starts_keeps_the_penalty_bounded() {
+        // 17 levels: 0, then 8 steps of 0.1·1.3ᵏ on each side.
+        let solve = |b: f64, start: Vec<f64>, warm: Option<(Vec<f64>, f64)>| {
+            let mut solver = AugmentedLagrangian::new(nelder_mead)
+                .with_tolerance(1e-8)
+                .unwrap();
+            if let Some((multipliers, penalty)) = warm {
+                solver = solver
+                    .with_multipliers(multipliers)
+                    .with_penalty(penalty)
+                    .unwrap();
+            }
+            let res = Executor::new(Circle { b }, solver)
+                .configure(|state| state.param(start).max_iters(100))
                 .run()
-                .unwrap()
-        };
-        let warm = solve(
-            AugmentedLagrangian::new(nelder_mead)
-                .with_tolerance(1e-6)
-                .unwrap()
-                .with_multipliers(multipliers)
-                .with_penalty(penalty)
-                .unwrap(),
-        );
-        let cold = solve(
-            AugmentedLagrangian::new(nelder_mead)
-                .with_tolerance(1e-6)
-                .unwrap()
-                .with_penalty(penalty)
-                .unwrap(),
-        );
-
-        for res in [&warm, &cold] {
+                .unwrap();
+            let state = res.state().clone();
             assert_eq!(
-                res.state().get_termination_reason(),
+                state.get_termination_reason(),
                 Some(&crate::core::TerminationReason::SolverConverged)
             );
-            assert_relative_eq!(
-                res.state().get_multipliers().unwrap()[0],
-                -1.01,
-                epsilon = 1e-4
+            assert!(state.get_penalty() <= 1e3, "μ = {}", state.get_penalty());
+            let multiplier = state.get_multipliers().unwrap()[0];
+            assert!(
+                (multiplier + b).abs() <= 1e-6,
+                "λ = {multiplier} at c = {b}"
             );
+            state
+        };
+
+        let first = solve(0.0, vec![0.0, 0.0], None);
+        let mut points = 1;
+        for sign in [1.0, -1.0] {
+            let mut prev = first.clone();
+            let mut prev_prev: Option<(Vec<f64>, f64)> = None;
+            let (mut b_prev, mut b, mut step) = (0.0, 0.0, 0.1);
+            for _ in 0..8 {
+                b += sign * step;
+                step *= 1.3;
+                let x_prev = prev.get_best_param().unwrap().clone();
+                let start = match &prev_prev {
+                    Some((x_pp, b_pp)) => {
+                        let t = (b - b_prev) / (b_prev - b_pp);
+                        x_prev
+                            .iter()
+                            .zip(x_pp)
+                            .map(|(a, c)| a + t * (a - c))
+                            .collect()
+                    }
+                    None => x_prev.clone(),
+                };
+                let warm = Some((prev.get_multipliers().unwrap().clone(), prev.get_penalty()));
+                let next = solve(b, start, warm);
+                prev_prev = Some((x_prev, b_prev));
+                b_prev = b;
+                prev = next;
+                points += 1;
+            }
         }
-        assert!(warm.state().get_iter() < cold.state().get_iter());
+        assert_eq!(points, 17);
+    }
+
+    #[test]
+    fn test_initial_penalty_follows_the_algencan_formula() {
+        // μ₀ = 10·max{1, |f(x₀)| / max{1, ½‖c(x₀)‖²}}
+        for (start, expected) in [
+            // |f| small: f = 0.02, ½c² = 0.32, so μ₀ = 10.
+            (vec![0.1, 0.1], 10.0),
+            // |f| large, c = 0: f = 13, so μ₀ = 130.
+            (vec![3.0, -2.0], 130.0),
+            // |f| large, ½c² large: f = 200, ½c² = 180.5, so μ₀ = 2000 / 180.5.
+            (vec![10.0, 10.0], 2000.0 / 180.5),
+        ] {
+            let mut al = new_solver();
+            let (state, _) = al
+                .init(
+                    &mut Problem::new(Circle { b: 1.0 }),
+                    AugmentedLagrangianState::new().param(start),
+                )
+                .unwrap();
+            assert_relative_eq!(state.get_penalty(), expected, epsilon = 1e-12);
+        }
     }
 
     #[test]
@@ -856,9 +985,9 @@ mod tests {
     fn test_new() {
         let al = new_solver();
         assert!(al.multipliers.is_none());
-        assert_eq!(al.penalty.to_ne_bytes(), 10.0f64.to_ne_bytes());
+        assert!(al.penalty.is_none());
         assert_eq!(al.penalty_factor.to_ne_bytes(), 10.0f64.to_ne_bytes());
-        assert_eq!(al.decrease_ratio.to_ne_bytes(), 0.25f64.to_ne_bytes());
+        assert_eq!(al.decrease_ratio.to_ne_bytes(), 0.5f64.to_ne_bytes());
         assert_eq!(
             al.tolerance.to_ne_bytes(),
             f64::EPSILON.sqrt().to_ne_bytes()
@@ -890,7 +1019,7 @@ mod tests {
     fn test_with_penalty() {
         for penalty in [f64::EPSILON, 1.0, 1e6] {
             let al = new_solver().with_penalty(penalty).unwrap();
-            assert_eq!(al.penalty.to_ne_bytes(), penalty.to_ne_bytes());
+            assert_eq!(al.penalty, Some(penalty));
         }
         for penalty in [0.0, -1.0] {
             assert_error!(
@@ -987,9 +1116,10 @@ mod tests {
 
         let factory = |_: &Vec<f64>| {
             let solver = ParticleSwarm::new((vec![-2.0, -2.0], vec![2.0, 2.0]), 40)
-                .with_rng_generator(rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(42));
+                .with_rng_generator(rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(42))
+                .with_radius_stop(1e-8)?;
             let state: PopulationState<Particle<Vec<f64>, f64>, f64> =
-                PopulationState::new().max_iters(300);
+                PopulationState::new().max_iters(1000);
             Ok((solver, state))
         };
         let solver = AugmentedLagrangian::new(factory)
@@ -1006,12 +1136,14 @@ mod tests {
         assert_relative_eq!(x[0], 0.5, epsilon = 1e-3);
         assert_relative_eq!(x[1], 0.5, epsilon = 1e-3);
         assert_relative_eq!(state.get_multipliers().unwrap()[0], -1.0, epsilon = 1e-2);
-        // A particle swarm stops only at its maximum number of iterations, so its runs never
-        // converge and the solver stops at its own maximum number of iterations.
-        assert!(!state.get_inner_converged());
+        // The radius stop rule ends each swarm run with `SolverConverged`, so the solver stops by
+        // its tolerance.
+        assert!(state.get_inner_converged());
+        assert!(state.get_constraint_norm() <= 1e-4);
+        assert!(state.get_iter() < 8);
         assert_eq!(
             state.get_termination_reason(),
-            Some(&crate::core::TerminationReason::MaxItersReached)
+            Some(&crate::core::TerminationReason::SolverConverged)
         );
     }
 }
