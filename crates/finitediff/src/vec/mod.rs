@@ -20,9 +20,11 @@ use num::{Float, FromPrimitive};
 use crate::PerturbationVectors;
 use diff::{central_diff_vec, forward_diff_vec};
 use hessian::{
-    central_hessian_vec, central_hessian_vec_prod_vec, forward_hessian_nograd_sparse_vec,
-    forward_hessian_nograd_vec, forward_hessian_vec, forward_hessian_vec_prod_vec,
+    central_hessian_nograd_error_vec, central_hessian_nograd_steps_vec, central_hessian_vec,
+    central_hessian_vec_prod_vec, forward_hessian_nograd_sparse_vec, forward_hessian_nograd_vec,
+    forward_hessian_vec, forward_hessian_vec_prod_vec,
 };
+pub use hessian::{CentralHessian, CentralHessianEstimate};
 use jacobian::{
     central_jacobian_pert_vec, central_jacobian_vec, central_jacobian_vec_prod_vec,
     forward_jacobian_pert_vec, forward_jacobian_vec, forward_jacobian_vec_prod_vec,
@@ -166,6 +168,34 @@ where
     F: Float + FromPrimitive + AddAssign,
 {
     move |p: &Vec<F>, indices: Vec<[usize; 2]>| forward_hessian_nograd_sparse_vec(p, f, indices)
+}
+
+/// The Hessian of `f` by central differences with one step per coordinate:
+/// see [`central_hessian_nograd_steps_vec`]. The closure takes the point and
+/// the steps.
+#[inline(always)]
+pub fn central_hessian_nograd_steps<F>(
+    f: CostFn<'_, F>,
+) -> impl Fn(&Vec<F>, &[F]) -> Result<CentralHessian<F>, Error> + '_
+where
+    F: Float + FromPrimitive,
+{
+    move |p: &Vec<F>, steps: &[F]| central_hessian_nograd_steps_vec(p, f, steps)
+}
+
+/// The Hessian of `f` by central differences with one step per coordinate,
+/// and the error of each entry: see [`central_hessian_nograd_error_vec`]. The
+/// closure takes the point, the steps and the relative accuracy of `f`.
+#[inline(always)]
+pub fn central_hessian_nograd_error<F>(
+    f: CostFn<'_, F>,
+) -> impl Fn(&Vec<F>, &[F], F) -> Result<CentralHessianEstimate<F>, Error> + '_
+where
+    F: Float + FromPrimitive,
+{
+    move |p: &Vec<F>, steps: &[F], accuracy: F| {
+        central_hessian_nograd_error_vec(p, f, steps, accuracy)
+    }
 }
 
 #[cfg(test)]
@@ -452,6 +482,33 @@ mod tests {
         for i in 0..4 {
             for j in 0..4 {
                 assert!((res[i][j] - out[i][j]).abs() < COMP_ACC)
+            }
+        }
+    }
+
+    #[test]
+    fn test_central_hessian_nograd_steps_func() {
+        let hessian = central_hessian_nograd_steps(&f3);
+        let out = hessian(&x3(), &[1e-3, 1e-2, 1e-3, 1e-1]).unwrap();
+        let res = res2();
+        assert_eq!(out.evaluations, 2 * 4 * 4 + 1);
+        for (row, out_row) in res.iter().zip(&out.hessian) {
+            for (expected, value) in row.iter().zip(out_row) {
+                assert!((expected - value).abs() < COMP_ACC)
+            }
+        }
+    }
+
+    #[test]
+    fn test_central_hessian_nograd_error_func() {
+        let hessian = central_hessian_nograd_error(&f3);
+        let out = hessian(&x3(), &[1e-3, 1e-2, 1e-3, 1e-1], f64::EPSILON).unwrap();
+        let res = res2();
+        let error = out.error();
+        assert_eq!(out.evaluations, 4 * 4 * 4 + 1);
+        for i in 0..4 {
+            for j in 0..4 {
+                assert!((res[i][j] - out.hessian[i][j]).abs() <= error[i][j])
             }
         }
     }

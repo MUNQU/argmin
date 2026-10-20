@@ -48,6 +48,7 @@
 //!   * [Product of the Hessian `H(x)` with a vector `p`](#product-of-the-hessian-hx-with-a-vector-p)
 //!   * [Calculation of the Hessian without knowledge of the gradient](#calculation-of-the-hessian-without-knowledge-of-the-gradient)
 //!   * [Calculation of the sparse Hessian without knowledge of the gradient](#calculation-of-the-sparse-hessian-without-knowledge-of-the-gradient)
+//!   * [Central Hessian with given steps and an error estimate](#central-hessian-with-given-steps-and-an-error-estimate)
 //!
 //!
 //! ## Calculation of the gradient
@@ -430,6 +431,45 @@
 //! #  for i in 0..4 {
 //! #      for j in 0..4 {
 //! #          assert!((res[i][j] - hessian[i][j]).abs() < 1e-6)
+//! #      }
+//! #  }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Central Hessian with given steps and an error estimate
+//!
+//! When the cost is accurate only to a relative `δ` (for example a cost that solves an ODE to a
+//! tolerance), the fixed steps above give a useless Hessian. `central_hessian_nograd_steps` takes
+//! one step per coordinate (`2p² + 1` evaluations); `central_hessian_nograd_error` also computes
+//! the Hessian with twice the steps and returns an estimate of the error of each entry
+//! (`4p² + 1` evaluations). For a cost of relative accuracy `δ`, take the step of coordinate `i`
+//! as `δ^(1/4)` times its scale. Only implemented for `Vec<F>`.
+//!
+//! ```rust
+//! # fn main() -> Result<(), anyhow::Error> {
+//! use finitediff::vec;
+//!
+//! let f = |x: &Vec<f64>| -> Result<f64, anyhow::Error> { Ok((x[0] * x[1]).exp()) };
+//! let x = vec![1.2f64, 0.9];
+//!
+//! // The relative accuracy of `f`, and one step per coordinate from it.
+//! let accuracy = f64::EPSILON;
+//! let steps: Vec<f64> = x.iter().map(|v| accuracy.powf(0.25) * v.abs().max(1.0)).collect();
+//!
+//! let h = vec::central_hessian_nograd_error(&f);
+//! let estimate = h(&x, &steps, accuracy)?;
+//! let error = estimate.error();
+//! assert_eq!(estimate.evaluations, 4 * 2 * 2 + 1);
+//! #
+//! #  let e = (x[0] * x[1]).exp();
+//! #  let res = vec![
+//! #      vec![x[1] * x[1] * e, (1.0 + x[0] * x[1]) * e],
+//! #      vec![(1.0 + x[0] * x[1]) * e, x[0] * x[0] * e],
+//! #  ];
+//! #  for i in 0..2 {
+//! #      for j in 0..2 {
+//! #          assert!((res[i][j] - estimate.hessian[i][j]).abs() <= error[i][j]);
 //! #      }
 //! #  }
 //! # Ok(())
