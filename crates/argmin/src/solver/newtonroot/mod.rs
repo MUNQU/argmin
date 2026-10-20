@@ -27,6 +27,17 @@
 //! that already evaluated them gives the values with
 //! [`NewtonRoot::with_bracket_values`] and saves these two evaluations.
 //!
+//! ## When the iterations run out
+//!
+//! A bisection gains one bit per step, so a root many orders of magnitude from the middle of the
+//! bracket needs many steps: the root `1e-300` of `x^0.01 − 1e-3` in `[0, 0.5]` needs about a
+//! thousand. When the last iteration ends with the tolerance not met, the solver bisects the
+//! floating-point numbers between the ends of the bracket in their order, not in their values:
+//! each step halves the count of the numbers between the ends, so it ends within 64 more
+//! evaluations of `f` at any scale. The result is the smallest of these numbers where `f` is 0
+//! or has the sign of `f(max)`, and the termination reason stays `MaxItersReached`. A root found
+//! within the iterations does not change.
+//!
 //! ## When to prefer it to `BrentRoot`
 //!
 //! Use [`NewtonRoot`] when the derivative is available at a small cost, for example the density
@@ -61,6 +72,11 @@ use serde::{Deserialize, Serialize};
 /// The result is the last point, `state.param`, and the cost of a point is `|f(x)|`. When the
 /// solver stops on the step tolerance, it does not evaluate the last point: its cost is infinite
 /// (not computed), and `state.best_param` is the point before, at most `tol · |x|` away.
+///
+/// When the maximum number of iterations stops the solver with the tolerance not met, the last
+/// iteration bisects the floating-point numbers of the bracket in their order, so the result is
+/// a root to the last floating-point number and the reason is `MaxItersReached` (see the
+/// [module documentation](`crate::solver::newtonroot`)).
 ///
 /// ## Requirements on the optimization problem
 ///
@@ -233,13 +249,7 @@ where
     ) -> Result<(IterState<F, (), (), (), (), F>, Option<KV>), Error> {
         let (x, fx) = (self.x, self.fx);
         // The root lies between x and the end where f has the other sign.
-        if (fx > F::zero()) == (self.f_high > F::zero()) {
-            self.high = x;
-            self.f_high = fx;
-        } else {
-            self.low = x;
-            self.f_low = fx;
-        }
+        self.narrow(x, fx);
         let newton = x - fx / problem.gradient(&x)?;
         // A derivative of 0 or not finite gives a step that is not finite: the comparisons fail.
         let next = if newton > self.low && newton < self.high {
@@ -272,15 +282,81 @@ where
             ));
         }
         self.fx = problem.cost(&next)?;
-        let state = state.param(next).cost(self.fx.abs());
         if self.fx == F::zero() {
+            let state = state.param(next).cost(F::zero());
             return Ok((
                 state.terminate_with(TerminationReason::SolverConverged),
                 None,
             ));
         }
-        Ok((state, None))
+        if state.get_iter().saturating_add(1) >= state.get_max_iters() {
+            // The last iteration: the executor stops after it with `MaxItersReached`.
+            self.narrow(next, self.fx);
+            self.bisect_order(problem)?;
+            return Ok((state.param(self.x).cost(self.fx.abs()), None));
+        }
+        Ok((state.param(next).cost(self.fx.abs()), None))
     }
+}
+
+impl<F: ArgminFloat> NewtonRoot<F> {
+    /// Narrows the bracket to the side of `x` where the sign of `f` changes.
+    fn narrow(&mut self, x: F, fx: F) {
+        if (fx > F::zero()) == (self.f_high > F::zero()) {
+            self.high = x;
+            self.f_high = fx;
+        } else {
+            self.low = x;
+            self.f_low = fx;
+        }
+    }
+
+    /// Bisects the floating-point numbers between the ends of the bracket in their order, and
+    /// sets the current point to the smallest of them where `f` is 0 or has the sign of `f(max)`.
+    /// Each step halves the count of the numbers between the ends, so it ends within 64 steps at
+    /// any scale.
+    fn bisect_order<O>(&mut self, problem: &mut Problem<O>) -> Result<(), Error>
+    where
+        O: CostFunction<Param = F, Output = F>,
+    {
+        let zero = F::zero();
+        let low_sign = self.f_low < zero;
+        let (mut below, mut above) = (order(self.low), order(self.high));
+        while above - below > 1 {
+            let middle = below + (above - below) / 2;
+            let x = from_order(middle);
+            let fx = problem.cost(&x)?;
+            // A value of 0, or one that is not a number, goes to the upper end.
+            if (fx < zero && low_sign) || (fx > zero && !low_sign) {
+                below = middle;
+                self.low = x;
+                self.f_low = fx;
+            } else {
+                above = middle;
+                self.high = x;
+                self.f_high = fx;
+            }
+        }
+        self.x = self.high;
+        self.fx = self.f_high;
+        Ok(())
+    }
+}
+
+/// The place of `x` among the `f64` numbers, as an integer that grows with `x`: the order of
+/// [`f64::total_cmp`], shifted to start at 0.
+fn order<F: ArgminFloat>(x: F) -> u64 {
+    // `F` is a floating-point type such as `f32` or `f64`, which `f64` holds exactly.
+    let bits = x.to_f64().unwrap().to_bits() as i64;
+    ((bits ^ (((bits >> 63) as u64) >> 1) as i64) as u64) ^ (1 << 63)
+}
+
+/// The number at the place `key` of [`order`], rounded to `F`.
+fn from_order<F: ArgminFloat>(key: u64) -> F {
+    let bits = (key ^ (1 << 63)) as i64;
+    float!(f64::from_bits(
+        (bits ^ (((bits >> 63) as u64) >> 1) as i64) as u64
+    ))
 }
 
 /// The state at a root found where `f` is exactly 0.
@@ -397,6 +473,34 @@ mod tests {
         fn gradient(&self, x: &f64) -> Result<f64, Error> {
             let s = 1.0 / (1.0 + (-x).exp());
             Ok(s * (1.0 - s))
+        }
+    }
+
+    /// `sign · (x^0.01 − c)`: the distribution function of `Beta(0.01, 1)`
+    /// minus a level `c`, increasing for a sign of 1 and decreasing for −1.
+    /// For `c = 10⁻³` the root is `10⁻³⁰⁰`, three hundred orders of
+    /// magnitude below the middle of `[0, 0.5]`.
+    #[derive(Clone)]
+    struct Power {
+        c: f64,
+        sign: f64,
+    }
+
+    impl CostFunction for Power {
+        type Param = f64;
+        type Output = f64;
+
+        fn cost(&self, x: &f64) -> Result<f64, Error> {
+            Ok(self.sign * (x.powf(0.01) - self.c))
+        }
+    }
+
+    impl Gradient for Power {
+        type Param = f64;
+        type Gradient = f64;
+
+        fn gradient(&self, x: &f64) -> Result<f64, Error> {
+            Ok(self.sign * 0.01 * x.powf(-0.99))
         }
     }
 
@@ -704,7 +808,9 @@ mod tests {
     }
 
     /// The loop that commol inverts a distribution function with: the same
-    /// steps for an increasing function, with no evaluation at the ends.
+    /// steps for an increasing function, with no evaluation at the ends, and
+    /// a bisection in the order of the floating-point numbers when the steps
+    /// run out.
     #[allow(clippy::float_cmp)]
     fn reference(problem: &Logistic, mut low: f64, mut high: f64, steps: u64) -> f64 {
         let mut x = 0.5 * (low + high);
@@ -730,7 +836,16 @@ mod tests {
             }
             x = next;
         }
-        x
+        let (mut below, mut above) = (order(low), order(high));
+        while above - below > 1 {
+            let middle = below + (above - below) / 2;
+            if problem.cost(&from_order(middle)).unwrap() < 0.0 {
+                below = middle;
+            } else {
+                above = middle;
+            }
+        }
+        from_order(above)
     }
 
     /// The solver gives, bit for bit, the result of the loop it replaces.
@@ -866,6 +981,64 @@ mod tests {
                 .unwrap()
                 .with_bracket_values(f_min, f_max);
             assert_error!(res, ArgminError, message);
+        }
+    }
+
+    /// R1: when the iterations run out, a bisection of the floating-point
+    /// numbers in their order finds a root three hundred orders of magnitude
+    /// below the middle of the bracket, within 64 more evaluations of f.
+    #[test]
+    fn test_order_bisection_when_iterations_run_out() {
+        for sign in [1.0, -1.0] {
+            let state = solve(Power { c: 1e-3, sign }, 0.0, 0.5, None, 200);
+            let x = *state.get_param().unwrap();
+            // An absolute check: `assert_relative_eq` also accepts any difference
+            // below `f64::EPSILON`.
+            assert!((x - 1e-300).abs() <= 1e-12 * 1e-300, "{x:e}");
+            // The result is the end where f has the sign of f(max), and its
+            // cost is |f(x)|.
+            let fx = Power { c: 1e-3, sign }.cost(&x).unwrap();
+            assert!(fx == 0.0 || (fx > 0.0) == (sign > 0.0), "{fx:e}");
+            assert_eq!(state.get_cost().to_ne_bytes(), fx.abs().to_ne_bytes());
+            // The Newton and halving steps ran out: the reason says so.
+            assert_eq!(state.get_iter(), 200);
+            assert_eq!(
+                state.get_termination_reason(),
+                Some(&TerminationReason::MaxItersReached)
+            );
+            // Two ends, the middle, one point per iteration and at most 64
+            // points of the bisection.
+            assert!(count(&state, "cost_count") <= 2 + 1 + 200 + 64);
+            assert_eq!(count(&state, "gradient_count"), 200);
+        }
+    }
+
+    /// R1: a root found at the last iteration allowed is the same as with
+    /// more iterations, with no bisection in order.
+    #[test]
+    fn test_root_found_within_iterations_does_not_change() {
+        let problems = [
+            (Cubic { c: 2.0 }, 0.0, 2.0),
+            (Cubic { c: 2.0 }, -2.0, 2.0),
+            (Cubic { c: 1e-30 }, 0.0, 2.0),
+        ];
+        for (problem, min, max) in problems {
+            let free = solve(problem.clone(), min, max, None, 10_000);
+            let iters = free.get_iter();
+            let tight = solve(problem, min, max, None, iters);
+            assert_eq!(
+                free.get_termination_reason(),
+                Some(&TerminationReason::SolverConverged)
+            );
+            assert_eq!(
+                tight.get_termination_reason(),
+                Some(&TerminationReason::SolverConverged)
+            );
+            assert_eq!(
+                tight.get_param().unwrap().to_ne_bytes(),
+                free.get_param().unwrap().to_ne_bytes()
+            );
+            assert_eq!(tight.get_func_counts(), free.get_func_counts());
         }
     }
 
