@@ -23,6 +23,10 @@
 //! is relative and defaults to `4 ε`), when the next point is an end of the bracket (the bracket
 //! holds no other floating-point number), or after the maximum number of iterations.
 //!
+//! The solver evaluates `f` at the ends of the bracket to check the change of sign. A caller
+//! that already evaluated them gives the values with
+//! [`NewtonRoot::with_bracket_values`] and saves these two evaluations.
+//!
 //! ## When to prefer it to `BrentRoot`
 //!
 //! Use [`NewtonRoot`] when the derivative is available at a small cost, for example the density
@@ -79,6 +83,8 @@ pub struct NewtonRoot<F> {
     x: F,
     /// `f(x)`
     fx: F,
+    /// Whether the caller gave `f_low` and `f_high`, so that `init` does not evaluate them
+    ends_known: bool,
 }
 
 impl<F: ArgminFloat> NewtonRoot<F> {
@@ -112,6 +118,7 @@ impl<F: ArgminFloat> NewtonRoot<F> {
             f_high: F::nan(),
             x: F::nan(),
             fx: F::nan(),
+            ends_known: false,
         })
     }
 
@@ -140,6 +147,39 @@ impl<F: ArgminFloat> NewtonRoot<F> {
         self.tol = tol;
         Ok(self)
     }
+
+    /// Give the values of `f` at the ends of the bracket, `f_min = f(min)` and
+    /// `f_max = f(max)`, so that the solver does not evaluate them.
+    ///
+    /// Use it when the caller already evaluated `f` at the ends, for example while it searched
+    /// for the bracket: the solver then makes two fewer evaluations of `f` and gives the same
+    /// result. Both values must be finite. At initialization, the solver checks them as it checks
+    /// the values it evaluates: a value of 0 makes that end the root, and two values of the same
+    /// sign are an error.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use argmin::solver::newtonroot::NewtonRoot;
+    /// # use argmin::core::Error;
+    /// # fn main() -> Result<(), Error> {
+    /// // f(x) = x³ − 2: f(0) = −2 and f(2) = 6.
+    /// let solver = NewtonRoot::new(0.0f64, 2.0f64)?.with_bracket_values(-2.0, 6.0)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_bracket_values(mut self, f_min: F, f_max: F) -> Result<Self, Error> {
+        if !(f_min.is_finite() && f_max.is_finite()) {
+            return Err(argmin_error!(
+                InvalidParameter,
+                "`NewtonRoot`: f(min) and f(max) must be finite."
+            ));
+        }
+        self.f_low = f_min;
+        self.f_high = f_max;
+        self.ends_known = true;
+        Ok(self)
+    }
 }
 
 impl<O, F> Solver<O, IterState<F, (), (), (), (), F>> for NewtonRoot<F>
@@ -157,11 +197,15 @@ where
         // NewtonRoot starts at the middle of the bracket
         state: IterState<F, (), (), (), (), F>,
     ) -> Result<(IterState<F, (), (), (), (), F>, Option<KV>), Error> {
-        self.f_low = problem.cost(&self.low)?;
+        if !self.ends_known {
+            self.f_low = problem.cost(&self.low)?;
+        }
         if self.f_low == F::zero() {
             return Ok((root(state, self.low), None));
         }
-        self.f_high = problem.cost(&self.high)?;
+        if !self.ends_known {
+            self.f_high = problem.cost(&self.high)?;
+        }
         if self.f_high == F::zero() {
             return Ok((root(state, self.high), None));
         }
@@ -372,6 +416,7 @@ mod tests {
             f_high,
             x,
             fx,
+            ends_known,
         } = NewtonRoot::new(0.0f64, 2.0f64).unwrap();
 
         assert_eq!(tol.to_ne_bytes(), (4.0 * f64::EPSILON).to_ne_bytes());
@@ -381,6 +426,7 @@ mod tests {
         assert!(f_high.is_nan());
         assert!(x.is_nan());
         assert!(fx.is_nan());
+        assert!(!ends_known);
     }
 
     #[test]
@@ -706,5 +752,131 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Runs the solver on `problem` in `[min, max]`, with the values of f at
+    /// the ends when `ends` is given.
+    fn solve<O>(
+        problem: O,
+        min: f64,
+        max: f64,
+        ends: Option<(f64, f64)>,
+        steps: u64,
+    ) -> IterState<f64, (), (), (), (), f64>
+    where
+        O: CostFunction<Param = f64, Output = f64> + Gradient<Param = f64, Gradient = f64>,
+    {
+        let mut solver = NewtonRoot::new(min, max).unwrap();
+        if let Some((f_min, f_max)) = ends {
+            solver = solver.with_bracket_values(f_min, f_max).unwrap();
+        }
+        Executor::new(problem, solver)
+            .configure(|state| state.counting(true).max_iters(steps))
+            .run()
+            .unwrap()
+            .state()
+            .clone()
+    }
+
+    #[test]
+    fn test_bracket_values() {
+        let NewtonRoot {
+            f_low,
+            f_high,
+            ends_known,
+            ..
+        } = NewtonRoot::new(0.0f64, 2.0f64)
+            .unwrap()
+            .with_bracket_values(-2.0, 6.0)
+            .unwrap();
+        assert_eq!(f_low.to_ne_bytes(), (-2.0f64).to_ne_bytes());
+        assert_eq!(f_high.to_ne_bytes(), 6.0f64.to_ne_bytes());
+        assert!(ends_known);
+    }
+
+    /// Known values at the ends save the two evaluations of f there, and
+    /// the result does not change.
+    #[test]
+    fn test_bracket_values_save_two_evaluations() {
+        let without = solve(Cubic { c: 2.0 }, 0.0, 2.0, None, 100);
+        let with = solve(Cubic { c: 2.0 }, 0.0, 2.0, Some((-2.0, 6.0)), 100);
+        assert_eq!(
+            count(&with, "cost_count") + 2,
+            count(&without, "cost_count")
+        );
+        assert_eq!(
+            count(&with, "gradient_count"),
+            count(&without, "gradient_count")
+        );
+        assert_eq!(
+            with.get_param().unwrap().to_ne_bytes(),
+            without.get_param().unwrap().to_ne_bytes()
+        );
+
+        for steps in [1, 2, 3, 100] {
+            for p in [1e-6, 0.01, 0.3, 0.5, 0.7, 0.99, 1.0 - 1e-6] {
+                let problem = Logistic { p };
+                let ends = (problem.cost(&-40.0).unwrap(), problem.cost(&40.0).unwrap());
+                let expected = reference(&problem, -40.0, 40.0, steps);
+                let without = solve(problem.clone(), -40.0, 40.0, None, steps);
+                let with = solve(problem, -40.0, 40.0, Some(ends), steps);
+                assert_eq!(
+                    count(&with, "cost_count") + 2,
+                    count(&without, "cost_count"),
+                    "p = {p}, steps = {steps}"
+                );
+                assert_eq!(
+                    with.get_param().unwrap().to_ne_bytes(),
+                    expected.to_ne_bytes(),
+                    "p = {p}, steps = {steps}"
+                );
+            }
+        }
+    }
+
+    /// Known values with no change of sign give the error of evaluated ones.
+    #[test]
+    fn test_bracket_values_no_change_of_sign() {
+        let message = concat!(
+            "Invalid parameter: \"`NewtonRoot`: ",
+            "f(min) and f(max) must have different signs.\""
+        );
+        let mut solver = NewtonRoot::new(2.0f64, 3.0f64)
+            .unwrap()
+            .with_bracket_values(6.0, 25.0)
+            .unwrap();
+        let mut problem = Problem::new(Cubic { c: 2.0 });
+        let res = solver.init(&mut problem, IterState::new());
+        assert_error!(res, ArgminError, message);
+        // The error comes from the given values: f is not evaluated.
+        assert!(problem.counts.is_empty());
+    }
+
+    /// A value that is not finite is refused.
+    #[test]
+    fn test_bracket_values_not_finite() {
+        let message = "Invalid parameter: \"`NewtonRoot`: f(min) and f(max) must be finite.\"";
+        for (f_min, f_max) in [
+            (f64::NAN, 1.0),
+            (-1.0, f64::NAN),
+            (f64::NEG_INFINITY, 1.0),
+            (-1.0, f64::INFINITY),
+        ] {
+            let res = NewtonRoot::new(0.0f64, 2.0f64)
+                .unwrap()
+                .with_bracket_values(f_min, f_max);
+            assert_error!(res, ArgminError, message);
+        }
+    }
+
+    /// A known value of 0 at an end makes that end the result.
+    #[test]
+    fn test_bracket_values_root_at_an_end() {
+        let state = solve(Cubic { c: 1.0 }, 1.0, 3.0, Some((0.0, 26.0)), 100);
+        assert_eq!(
+            state.get_param().unwrap().to_ne_bytes(),
+            1.0f64.to_ne_bytes()
+        );
+        assert_eq!(count(&state, "cost_count"), 0);
     }
 }
