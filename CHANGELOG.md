@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `NelderMead::init` returns the error of a cost function at a vertex of the
   initial simplex instead of panicking on it.
+- `ParticleSwarm` counts a NaN cost as `+∞`, the worst cost, so that a run keeps
+  a best particle when the particle sorted first has a NaN cost. The
+  `BelowAverage` mutation averages the finite costs only.
 
 ## [argmin-math unreleased]
 

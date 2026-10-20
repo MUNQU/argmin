@@ -224,6 +224,13 @@ struct ImprovementStop<F> {
 /// numbers, so a run with the same seed is the same as without them up to the iteration where
 /// it stops.
 ///
+/// ### NaN Costs
+///
+/// A NaN cost counts as `+∞`, the worst cost: the swarm stores it as `+∞` when it evaluates a
+/// particle or a mutation, and when it receives a population. A run where some costs are NaN
+/// keeps the best of the other particles, and a run where every cost is NaN reports a best cost
+/// of `+∞`.
+///
 /// ## Requirements on the optimization problem
 ///
 /// The optimization problem is required to implement [`CostFunction`].
@@ -1008,7 +1015,9 @@ where
         };
         match (self.best_costs.front(), self.best_costs.back()) {
             (Some(&oldest), Some(&newest)) if self.best_costs.len() as u64 > stop.window => {
-                oldest - newest <= stop.tol_abs + stop.tol_rel * newest.abs()
+                // Equal costs did not improve, also when both are `+∞`, where the difference
+                // is NaN.
+                oldest == newest || oldest - newest <= stop.tol_abs + stop.tol_rel * newest.abs()
             }
             _ => false,
         }
@@ -1177,8 +1186,8 @@ where
                 .collect();
 
             // Evaluate both populations
-            let costs = problem.bulk_cost(&positions)?;
-            let opposite_costs = problem.bulk_cost(&opposite_positions)?;
+            let costs = costs_of(problem, &positions)?;
+            let opposite_costs = costs_of(problem, &opposite_positions)?;
 
             // Combine and select best num_particles
             let mut combined: Vec<(P, F)> = positions
@@ -1196,7 +1205,7 @@ where
                 .collect();
         }
 
-        let costs = problem.bulk_cost(&positions)?;
+        let costs = costs_of(problem, &positions)?;
 
         let velocities = if matches!(
             self.initialization_strategy,
@@ -1303,6 +1312,10 @@ where
         // Users can provide a population or it will be randomly created.
         let particles = match state.take_population() {
             Some(mut particles) if particles.len() == self.num_particles => {
+                for particle in particles.iter_mut() {
+                    particle.cost = worst_if_nan(particle.cost);
+                    particle.best_cost = worst_if_nan(particle.best_cost);
+                }
                 // sort them first
                 particles.sort_by(|a, b| {
                     a.cost
@@ -1411,7 +1424,7 @@ where
             })
             .collect();
 
-        let costs = problem.bulk_cost(&positions)?;
+        let costs = costs_of(problem, &positions)?;
 
         for (p, c) in particles.iter_mut().zip(costs.into_iter()) {
             p.cost = c;
@@ -1441,7 +1454,7 @@ where
                 MutationApplication::GlobalBestOnly => {
                     // Strategy 1: Mutate only the global best particle
                     let mutated_position = self.apply_mutation(&best_particle.position);
-                    let mutated_cost = problem.cost(&mutated_position)?;
+                    let mutated_cost = cost_of(problem, &mutated_position)?;
 
                     if mutated_cost < best_cost {
                         best_particle.position = mutated_position.clone();
@@ -1457,7 +1470,7 @@ where
                         .iter()
                         .map(|p| self.apply_mutation(&p.position))
                         .collect();
-                    let mutated_costs = problem.bulk_cost(&mutated_positions)?;
+                    let mutated_costs = costs_of(problem, &mutated_positions)?;
 
                     for ((particle, mutated_pos), mutated_cost) in particles
                         .iter_mut()
@@ -1487,12 +1500,22 @@ where
                     }
                 }
                 MutationApplication::BelowAverage => {
-                    // Strategy 3: Mutate only particles with below-average fitness
-                    let average_cost: F = particles
+                    // Strategy 3: Mutate only particles with below-average fitness.
+                    // The average is over the finite costs, so that a particle with a cost of
+                    // `+∞`, such as a NaN one, has below-average fitness. With no finite cost,
+                    // no particle has.
+                    let (sum, count) = particles
                         .iter()
                         .map(|p| p.cost)
-                        .fold(float!(0.0), |acc, c| acc + c)
-                        / F::from_usize(particles.len()).unwrap();
+                        .filter(|c| c.is_finite())
+                        .fold((float!(0.0), 0usize), |(sum, count), c| {
+                            (sum + c, count + 1)
+                        });
+                    let average_cost: F = if count > 0 {
+                        sum / F::from_usize(count).unwrap()
+                    } else {
+                        F::infinity()
+                    };
 
                     let mut mutated_positions = Vec::new();
                     let mut indices_to_mutate = Vec::new();
@@ -1505,7 +1528,7 @@ where
                     }
 
                     if !mutated_positions.is_empty() {
-                        let mutated_costs = problem.bulk_cost(&mutated_positions)?;
+                        let mutated_costs = costs_of(problem, &mutated_positions)?;
 
                         for (mutated_pos, mutated_cost) in
                             mutated_positions.into_iter().zip(mutated_costs.into_iter())
@@ -1556,6 +1579,41 @@ where
         }
         TerminationStatus::NotTerminated
     }
+}
+
+/// The cost with NaN as `+∞`, the worst cost
+///
+/// The swarm passes every cost through it, so that it sorts, picks the best and compares
+/// particles on numbers only.
+fn worst_if_nan<F: ArgminFloat>(cost: F) -> F {
+    if cost.is_nan() {
+        F::infinity()
+    } else {
+        cost
+    }
+}
+
+/// The cost of a position, with NaN as `+∞`
+fn cost_of<O, P, F>(problem: &mut Problem<O>, position: &P) -> Result<F, Error>
+where
+    O: CostFunction<Param = P, Output = F>,
+    F: ArgminFloat,
+{
+    problem.cost(position).map(worst_if_nan)
+}
+
+/// The costs of the positions, with NaN as `+∞`
+fn costs_of<O, P, Q, F>(problem: &mut Problem<O>, positions: &[Q]) -> Result<Vec<F>, Error>
+where
+    O: CostFunction<Param = P, Output = F> + SyncAlias,
+    Q: std::borrow::Borrow<P> + SyncAlias,
+    F: ArgminFloat,
+{
+    Ok(problem
+        .bulk_cost(positions)?
+        .into_iter()
+        .map(worst_if_nan)
+        .collect())
 }
 
 /// A single particle
@@ -2410,5 +2468,192 @@ mod tests {
         let pso: ParticleSwarm<Vec<f64>, f64, _> = ParticleSwarm::new((vec![-1.0], vec![1.0]), 40);
         assert!(pso.improvement_stop.is_none());
         assert!(pso.radius_stop.is_none());
+    }
+
+    /// `(x - 0.7)²` on `[0, 1]`, NaN below 0.5
+    struct NanBelowHalf {}
+
+    impl CostFunction for NanBelowHalf {
+        type Param = Vec<f64>;
+        type Output = f64;
+
+        fn cost(&self, p: &Self::Param) -> Result<Self::Output, Error> {
+            if p[0] < 0.5 {
+                Ok(f64::NAN)
+            } else {
+                Ok((p[0] - 0.7).powi(2))
+            }
+        }
+    }
+
+    /// A swarm of 10 particles in `[0, 1]` with the given seed.
+    fn seeded_unit_swarm(seed: u64) -> SeededSwarm {
+        use rand::SeedableRng;
+        ParticleSwarm::new((vec![0.0], vec![1.0]), 10)
+            .with_rng_generator(rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed))
+    }
+
+    /// Every cost is NaN
+    struct AllNan {}
+
+    impl CostFunction for AllNan {
+        type Param = Vec<f64>;
+        type Output = f64;
+
+        fn cost(&self, _p: &Self::Param) -> Result<Self::Output, Error> {
+            Ok(f64::NAN)
+        }
+    }
+
+    fn run_on<C>(cost: C, pso: SeededSwarm) -> PopulationState<Particle<Vec<f64>, f64>, f64>
+    where
+        C: CostFunction<Param = Vec<f64>, Output = f64> + SyncAlias,
+    {
+        crate::core::Executor::new(cost, pso)
+            .configure(|state| state.max_iters(100))
+            .run()
+            .unwrap()
+            .state()
+            .clone()
+    }
+
+    #[test]
+    fn test_a_nan_cost_counts_as_the_worst() {
+        // Seed 0 puts a particle where the cost is NaN first when NaN does not count as the worst.
+        let state = run_on(NanBelowHalf {}, seeded_unit_swarm(0));
+
+        let best = state.get_best_param().unwrap();
+        assert!((best.position[0] - 0.7).abs() < 1e-3);
+        assert!(!best.cost.is_nan());
+        assert!(state.get_best_cost() < 1e-6);
+    }
+
+    #[test]
+    fn test_a_nan_cost_counts_as_the_worst_for_each_mutation() {
+        for application in [
+            MutationApplication::GlobalBestOnly,
+            MutationApplication::AllParticles,
+            MutationApplication::BelowAverage,
+        ] {
+            let pso = seeded_unit_swarm(0)
+                .with_mutation(MutationStrategy::Gaussian(0.1), 0.5, application)
+                .unwrap();
+
+            let state = run_on(NanBelowHalf {}, pso);
+
+            let best = state.get_best_param().unwrap();
+            assert!((best.position[0] - 0.7).abs() < 1e-3);
+            assert!(state.get_population().unwrap()[0].cost < 1e-6);
+            for particle in state.get_population().unwrap() {
+                assert!(!particle.cost.is_nan());
+                assert!(!particle.best_cost.is_nan());
+            }
+        }
+    }
+
+    #[test]
+    fn test_a_provided_particle_with_a_nan_cost_counts_as_the_worst() {
+        let population = (0..10)
+            .map(|i| {
+                let cost = if i == 0 { f64::NAN } else { f64::from(i) };
+                Particle::new(vec![f64::from(i) / 10.0], cost, vec![0.0])
+            })
+            .collect();
+        let mut pso = seeded_unit_swarm(0);
+        let state = PopulationState::new().population(population);
+
+        let (state, _) = pso.init(&mut Problem::new(NanBelowHalf {}), state).unwrap();
+
+        let population = state.get_population().unwrap();
+        assert_eq!(population[0].cost.to_ne_bytes(), 1.0f64.to_ne_bytes());
+        assert_eq!(
+            population[9].cost.to_ne_bytes(),
+            f64::INFINITY.to_ne_bytes()
+        );
+        assert_eq!(
+            population[9].best_cost.to_ne_bytes(),
+            f64::INFINITY.to_ne_bytes()
+        );
+    }
+
+    #[test]
+    fn test_below_average_mutation_mutates_the_particles_with_a_nan_cost() {
+        /// NaN at the even calls among the first 10 and 1 at the others
+        struct HalfNan {
+            counter: std::sync::Mutex<usize>,
+        }
+
+        impl CostFunction for HalfNan {
+            type Param = Vec<f64>;
+            type Output = f64;
+
+            fn cost(&self, _p: &Self::Param) -> Result<Self::Output, Error> {
+                let mut counter = self.counter.lock().unwrap();
+                let cost = if *counter < 10 && counter.is_multiple_of(2) {
+                    f64::NAN
+                } else {
+                    1.0
+                };
+                *counter += 1;
+                Ok(cost)
+            }
+        }
+
+        let population = (0..10)
+            .map(|i| Particle::new(vec![f64::from(i) / 10.0], 1.0, vec![0.0]))
+            .collect();
+        let mut problem = Problem::new(HalfNan {
+            counter: std::sync::Mutex::new(0),
+        });
+        let mut pso = seeded_unit_swarm(0)
+            .with_mutation(
+                MutationStrategy::Gaussian(0.1),
+                1.0,
+                MutationApplication::BelowAverage,
+            )
+            .unwrap();
+        let (state, _) = pso
+            .init(&mut problem, PopulationState::new().population(population))
+            .unwrap();
+
+        pso.next_iter(&mut problem, state).unwrap();
+
+        // 10 moved particles and the 5 with a NaN cost, above the average 1 of the others.
+        let calls = *problem.problem.as_ref().unwrap().counter.lock().unwrap();
+        assert_eq!(calls, 15);
+    }
+
+    #[test]
+    fn test_a_run_where_every_cost_is_nan_reports_an_infinite_best_cost() {
+        let state = run_on(AllNan {}, seeded_unit_swarm(0));
+
+        assert_eq!(
+            state.get_termination_reason(),
+            Some(&TerminationReason::MaxItersReached)
+        );
+        assert_eq!(
+            state.get_best_cost().to_ne_bytes(),
+            f64::INFINITY.to_ne_bytes()
+        );
+        assert!(state.get_best_param().is_some());
+    }
+
+    #[test]
+    fn test_the_improvement_stop_holds_when_every_cost_is_nan() {
+        let pso = seeded_unit_swarm(0)
+            .with_improvement_stop(5, 0.0, 0.0)
+            .unwrap();
+
+        let state = run_on(AllNan {}, pso);
+
+        assert_eq!(
+            state.get_termination_reason(),
+            Some(&TerminationReason::SolverConverged)
+        );
+        assert_eq!(state.get_iter(), 5);
+        assert_eq!(
+            state.get_best_cost().to_ne_bytes(),
+            f64::INFINITY.to_ne_bytes()
+        );
     }
 }
