@@ -13,6 +13,7 @@
 /// Macros
 #[macro_use]
 pub mod macros;
+pub mod bounds;
 pub mod checkpointing;
 /// Error handling
 mod errors;
@@ -42,6 +43,7 @@ pub use crate::solver::conjugategradient::beta::NLCGBetaUpdate;
 pub use crate::solver::linesearch::LineSearch;
 pub use crate::solver::trustregion::TrustRegionRadius;
 pub use anyhow::Error;
+pub use bounds::{BoundedProblem, SineTransform};
 pub use errors::ArgminError;
 pub use executor::Executor;
 pub use float::ArgminFloat;
