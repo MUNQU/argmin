@@ -383,7 +383,7 @@ pub trait CostFunction {
 
 /// Defines the computation of multiple objective functions for multi-objective optimization.
 ///
-/// This trait is used by multi-objective optimization algorithms to evaluate multiple conflicting 
+/// This trait is used by multi-objective optimization algorithms to evaluate multiple conflicting
 /// objectives simultaneously.
 ///
 /// # Example
