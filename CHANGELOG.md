@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ParticleSwarm` counts a NaN cost as `+∞`, the worst cost, so that a run keeps
   a best particle when the particle sorted first has a NaN cost. The
   `BelowAverage` mutation averages the finite costs only.
+- `AugmentedLagrangianCost` scores its points in parallel only when the
+  `parallelize` of its problem's `CostFunction` returns `true`, and its
+  `bulk_cost` returns the error of the first failing point in the order of the
+  points, whatever the order in which the threads score them.
 
 ## [argmin-math unreleased]
 

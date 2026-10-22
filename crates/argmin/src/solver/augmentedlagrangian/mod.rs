@@ -94,10 +94,12 @@ mod state;
 pub use state::AugmentedLagrangianState;
 
 use crate::core::{
-    ArgminFloat, CostFunction, Error, Executor, Operator, OptimizationResult, Problem, Solver,
-    State, TerminationReason, TerminationStatus, KV,
+    ArgminFloat, CostFunction, Error, Executor, Operator, OptimizationResult, Problem, SendAlias,
+    Solver, State, SyncAlias, TerminationReason, TerminationStatus, KV,
 };
 use argmin_math::{ArgminDot, ArgminL2Norm, ArgminScaledAdd, ArgminZeroLike};
+#[cfg(feature = "rayon")]
+use rayon::prelude::*;
 #[cfg(feature = "serde1")]
 use serde::{Deserialize, Serialize};
 use std::borrow::Borrow;
@@ -391,6 +393,36 @@ where
         Ok(cost
             + self.multipliers.dot(&constraints)
             + float!(0.5) * self.penalty * constraints.dot(&constraints))
+    }
+
+    /// The costs of `params`, in parallel when [`parallelize`](`CostFunction::parallelize`) is
+    /// `true` and the `rayon` feature is enabled. When several points fail, the error is that of
+    /// the first one in the order of `params`, whatever the order in which the threads score them.
+    fn bulk_cost<Q>(&self, params: &[Q]) -> Result<Vec<Self::Output>, Error>
+    where
+        Q: Borrow<Self::Param> + SyncAlias,
+        Self::Output: SendAlias,
+        Self: SyncAlias,
+    {
+        #[cfg(feature = "rayon")]
+        {
+            if self.parallelize() {
+                let costs: Vec<Result<F, Error>> = params
+                    .par_iter()
+                    .map(|param| self.cost(param.borrow()))
+                    .collect();
+                return costs.into_iter().collect();
+            }
+        }
+        params
+            .iter()
+            .map(|param| self.cost(param.borrow()))
+            .collect()
+    }
+
+    /// Whether the problem scores its points in parallel, as its [`CostFunction`] says.
+    fn parallelize(&self) -> bool {
+        CostFunction::parallelize(&self.problem)
     }
 }
 
@@ -1106,6 +1138,69 @@ mod tests {
         };
         // f = 1 + 4 = 5, c = 2, λc = -2, (μ/2)c² = 8.
         assert_relative_eq!(augmented.cost(&vec![1.0, 2.0]).unwrap(), 11.0);
+    }
+
+    /// `x²` under `x = 0`, which fails at each point `x ≥ 40` with a message that names the
+    /// point. The point 40 fails 50 ms after the call, so the other failing points fail first.
+    struct FailsFromForty {
+        parallel: bool,
+    }
+
+    impl CostFunction for FailsFromForty {
+        type Param = Vec<f64>;
+        type Output = f64;
+
+        fn cost(&self, p: &Self::Param) -> Result<Self::Output, Error> {
+            if (p[0] - 40.0).abs() < 0.5 {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            if p[0] >= 40.0 {
+                return Err(Error::msg(format!("fails at {}", p[0])));
+            }
+            Ok(p[0].powi(2))
+        }
+
+        fn parallelize(&self) -> bool {
+            self.parallel
+        }
+    }
+
+    impl Operator for FailsFromForty {
+        type Param = Vec<f64>;
+        type Output = Vec<f64>;
+
+        fn apply(&self, p: &Self::Param) -> Result<Self::Output, Error> {
+            Ok(vec![p[0]])
+        }
+    }
+
+    #[test]
+    fn test_augmented_cost_parallelizes_as_its_problem() {
+        for parallel in [true, false] {
+            let augmented = AugmentedLagrangianCost {
+                problem: FailsFromForty { parallel },
+                multipliers: vec![0.0],
+                penalty: 1.0,
+            };
+            assert_eq!(augmented.parallelize(), parallel);
+        }
+    }
+
+    #[test]
+    fn test_augmented_bulk_cost_returns_the_error_of_the_first_failing_point() {
+        let points: Vec<Vec<f64>> = (0..64).map(|i| vec![f64::from(i)]).collect();
+        for parallel in [true, false] {
+            let augmented = AugmentedLagrangianCost {
+                problem: FailsFromForty { parallel },
+                multipliers: vec![0.0],
+                penalty: 1.0,
+            };
+            let error = augmented.bulk_cost(&points).unwrap_err();
+            assert_eq!(error.to_string(), "fails at 40");
+            // f = x², c = x, (μ/2)c² = x²/2.
+            let costs = augmented.bulk_cost(&points[..40]).unwrap();
+            assert_relative_eq!(costs[3], 13.5);
+        }
     }
     #[cfg(feature = "rand")]
     #[test]
