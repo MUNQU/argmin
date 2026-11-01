@@ -24,7 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BelowAverage` mutation averages the finite costs only.
 - `ParticleSwarm::init` returns an error when a bound is not finite, or when twice
   the distance between the bounds is not finite, instead of panicking in its
-  uniform draws.
+  uniform draws. The error names the cause: the lower bound, the upper bound, or
+  bounds that are too far apart. `ParticleSwarm::new` documents that the bounds
+  must have the same, non-zero length.
 - `AugmentedLagrangianCost` scores its points in parallel only when the
   `parallelize` of its problem's `CostFunction` returns `true`, and its
   `bulk_cost` returns the error of the first failing point in the order of the
