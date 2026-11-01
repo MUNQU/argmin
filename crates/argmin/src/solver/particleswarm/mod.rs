@@ -1034,6 +1034,12 @@ where
 
     /// Whether every particle is within `tol` times the size of the search box from the best
     /// position
+    ///
+    /// The L2 norm of the box overflows for bounds that `check_bounds` accepts, such as
+    /// `±1e200` in two dimensions. Then both norms are taken of the vectors scaled by the
+    /// smallest positive float, a power of two: the ratio of the norms stays the same, and no
+    /// norm overflows. When the norm of the box is finite, so is the radius, because every
+    /// position is inside the box.
     fn radius_converged(&self, state: &PopulationState<Particle<P, F>, F>) -> bool
     where
         P: ArgminL2Norm<F>,
@@ -1045,10 +1051,17 @@ where
             return false;
         };
         let (min, max) = &self.bounds;
-        let box_size = max.sub(min).l2_norm();
+        let width = max.sub(min);
+        let unscaled = width.l2_norm();
+        let scale = if unscaled.is_finite() {
+            float!(1.0)
+        } else {
+            F::min_positive_value()
+        };
+        let box_size = width.mul(&scale).l2_norm();
         let radius = population
             .iter()
-            .map(|p| p.position.sub(&best.position).l2_norm())
+            .map(|p| p.position.sub(&best.position).mul(&scale).l2_norm())
             .fold(float!(0.0), F::max);
         radius <= tol * box_size
     }
@@ -2438,6 +2451,25 @@ mod tests {
             assert!(distance <= 1e-6 * box_size);
         }
         assert!(best.iter().all(|x| x.abs() < 1e-4));
+    }
+
+    #[test]
+    fn the_radius_stop_does_not_overflow_with_wide_bounds() {
+        use rand::SeedableRng;
+        // The L2 norm of the box of these bounds overflows, so before the scaling every
+        // radius was within `tol` times an infinite box.
+        let pso = ParticleSwarm::new((vec![-1e200, -1e200], vec![1e200, 1e200]), 20)
+            .with_rng_generator(rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(42))
+            .with_radius_stop(1e-3)
+            .unwrap();
+
+        let state = run(pso, 5);
+
+        assert_eq!(
+            state.get_termination_reason(),
+            Some(&TerminationReason::MaxItersReached)
+        );
+        assert_eq!(state.get_iter(), 5);
     }
 
     #[test]
