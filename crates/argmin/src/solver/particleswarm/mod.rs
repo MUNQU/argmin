@@ -343,6 +343,9 @@ where
     /// Takes the number of particles and bounds on the search space as inputs. `bounds` is a tuple
     /// `(lower_bound, upper_bound)`, where `lower_bound` and `upper_bound` are of the same type as
     /// the position of a particle (`P`) and of the same length as the problem as dimensions.
+    /// Every bound must be finite, and so must twice the distance between the bounds: the swarm
+    /// draws its positions between the bounds and its velocities between `-(max - min)` and
+    /// `max - min`. [`init`](`Solver::init`) returns an error otherwise.
     ///
     /// The inertia weight on velocity and the social and cognitive acceleration factors can be
     /// adapted with [`with_inertia_factor`](`ParticleSwarm::with_inertia_factor`),
@@ -1239,6 +1242,29 @@ where
         Ok(particles)
     }
 
+    /// Checks that the swarm can draw inside its bounds.
+    ///
+    /// Positions are drawn between the bounds and velocities between `-Δ` and `Δ`, with
+    /// `Δ = max - min`, and a uniform draw needs a finite range. So the bounds and `2Δ` must be
+    /// finite. The check scales `2Δ` by the smallest positive float before its L2 norm: a value
+    /// that is not finite stays so, and a finite one becomes small enough that its square
+    /// cannot overflow.
+    fn check_bounds(&self) -> Result<(), Error>
+    where
+        P: ArgminSub<P, P> + ArgminMul<F, P> + ArgminL2Norm<F>,
+    {
+        let (min, max) = &self.bounds;
+        let range = max.sub(min).mul(&float!(2.0));
+        if !range.mul(&F::min_positive_value()).l2_norm().is_finite() {
+            return Err(argmin_error!(
+                InvalidParameter,
+                "`ParticleSwarm`: every bound must be finite, and so must twice the distance \
+                 between the bounds"
+            ));
+        }
+        Ok(())
+    }
+
     /// Initializes positions and velocities for all particles
     fn initialize_positions_and_velocities(&mut self) -> (Vec<P>, Vec<P>) {
         let (min, max) = &self.bounds;
@@ -1309,6 +1335,8 @@ where
         problem: &mut Problem<O>,
         mut state: PopulationState<Particle<P, F>, F>,
     ) -> Result<(PopulationState<Particle<P, F>, F>, Option<KV>), Error> {
+        // A provided population still draws velocities between the bounds when they mutate.
+        self.check_bounds()?;
         // Users can provide a population or it will be randomly created.
         let particles = match state.take_population() {
             Some(mut particles) if particles.len() == self.num_particles => {
@@ -2205,6 +2233,26 @@ mod tests {
                 "Provided list of particles is of length 1, expected 40\"",
             )
         );
+    }
+
+    #[test]
+    fn an_infinite_bound_is_an_error() {
+        let message = concat!(
+            "Invalid parameter: \"`ParticleSwarm`: every bound must be finite, ",
+            "and so must twice the distance between the bounds\""
+        );
+        let bounds = [
+            (vec![0.0], vec![f64::INFINITY]),
+            (vec![f64::NEG_INFINITY, 0.0], vec![1.0, 1.0]),
+            (vec![f64::NAN], vec![1.0]),
+            (vec![-1e308], vec![1e308]),
+        ];
+        for (lower, upper) in bounds {
+            let mut pso: ParticleSwarm<_, f64, _> = ParticleSwarm::new((lower, upper), 4);
+            let state: PopulationState<Particle<Vec<f64>, f64>, f64> = PopulationState::new();
+            let res = pso.init(&mut Problem::new(TestProblem::new()), state);
+            assert_error!(res, ArgminError, message);
+        }
     }
 
     #[test]
