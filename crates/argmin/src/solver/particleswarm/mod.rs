@@ -1273,7 +1273,7 @@ where
         if !is_finite(&max.sub(min).mul(&float!(2.0))) {
             return Err(argmin_error!(
                 InvalidParameter,
-                "`ParticleSwarm`: the bounds are too far apart: twice the distance between them \
+                "`ParticleSwarm`: the bounds are too far apart. Twice the distance between them \
                  is not finite"
             ));
         }
@@ -2268,8 +2268,8 @@ mod tests {
         let lower = "Invalid parameter: \"`ParticleSwarm`: the lower bound is not finite\"";
         let upper = "Invalid parameter: \"`ParticleSwarm`: the upper bound is not finite\"";
         let apart = concat!(
-            "Invalid parameter: \"`ParticleSwarm`: the bounds are too far apart: ",
-            "twice the distance between them is not finite\""
+            "Invalid parameter: \"`ParticleSwarm`: the bounds are too far apart. ",
+            "Twice the distance between them is not finite\""
         );
         let cases = [
             (vec![0.0], vec![f64::INFINITY], upper),
