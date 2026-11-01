@@ -390,6 +390,12 @@ where
     /// # let upper_bound: Vec<f64> = vec![1.0, 1.0];
     /// let pso: ParticleSwarm<_, f64, _> = ParticleSwarm::new((lower_bound, upper_bound), 40);
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// The lower and the upper bound must have the same, non-zero length. `init` subtracts one
+    /// from the other, and the subtraction of a type such as `Vec` panics on other lengths. The
+    /// swarm cannot check the length of a generic `P`.
     pub fn new(bounds: (P, P), num_particles: usize) -> Self {
         ParticleSwarm {
             // Core PSO parameters
@@ -1245,21 +1251,30 @@ where
     /// Checks that the swarm can draw inside its bounds.
     ///
     /// Positions are drawn between the bounds and velocities between `-Δ` and `Δ`, with
-    /// `Δ = max - min`, and a uniform draw needs a finite range. So the bounds and `2Δ` must be
-    /// finite. The check scales `2Δ` by the smallest positive float before its L2 norm: a value
-    /// that is not finite stays so, and a finite one becomes small enough that its square
-    /// cannot overflow.
+    /// `Δ = max - min`, and a uniform draw needs a finite range. So each bound and `2Δ` must be
+    /// finite, and the error names the first one that is not.
     fn check_bounds(&self) -> Result<(), Error>
     where
         P: ArgminSub<P, P> + ArgminMul<F, P> + ArgminL2Norm<F>,
     {
         let (min, max) = &self.bounds;
-        let range = max.sub(min).mul(&float!(2.0));
-        if !range.mul(&F::min_positive_value()).l2_norm().is_finite() {
+        if !is_finite(min) {
             return Err(argmin_error!(
                 InvalidParameter,
-                "`ParticleSwarm`: every bound must be finite, and so must twice the distance \
-                 between the bounds"
+                "`ParticleSwarm`: the lower bound is not finite"
+            ));
+        }
+        if !is_finite(max) {
+            return Err(argmin_error!(
+                InvalidParameter,
+                "`ParticleSwarm`: the upper bound is not finite"
+            ));
+        }
+        if !is_finite(&max.sub(min).mul(&float!(2.0))) {
+            return Err(argmin_error!(
+                InvalidParameter,
+                "`ParticleSwarm`: the bounds are too far apart. Twice the distance between them \
+                 is not finite"
             ));
         }
         Ok(())
@@ -1309,6 +1324,19 @@ where
 
         (positions, velocities)
     }
+}
+
+/// Whether every element of `x` is finite.
+///
+/// `P` is generic and `argmin-math` has no finiteness trait, so the check scales `x` by the
+/// smallest positive float before its L2 norm: an element that is not finite stays so, and a
+/// finite one becomes small enough that its square cannot overflow.
+fn is_finite<P, F>(x: &P) -> bool
+where
+    P: ArgminMul<F, P> + ArgminL2Norm<F>,
+    F: ArgminFloat,
+{
+    x.mul(&F::min_positive_value()).l2_norm().is_finite()
 }
 
 impl<O, P, F, R> Solver<O, PopulationState<Particle<P, F>, F>> for ParticleSwarm<P, F, R>
@@ -2237,17 +2265,22 @@ mod tests {
 
     #[test]
     fn an_infinite_bound_is_an_error() {
-        let message = concat!(
-            "Invalid parameter: \"`ParticleSwarm`: every bound must be finite, ",
-            "and so must twice the distance between the bounds\""
+        let lower = "Invalid parameter: \"`ParticleSwarm`: the lower bound is not finite\"";
+        let upper = "Invalid parameter: \"`ParticleSwarm`: the upper bound is not finite\"";
+        let apart = concat!(
+            "Invalid parameter: \"`ParticleSwarm`: the bounds are too far apart. ",
+            "Twice the distance between them is not finite\""
         );
-        let bounds = [
-            (vec![0.0], vec![f64::INFINITY]),
-            (vec![f64::NEG_INFINITY, 0.0], vec![1.0, 1.0]),
-            (vec![f64::NAN], vec![1.0]),
-            (vec![-1e308], vec![1e308]),
+        let cases = [
+            (vec![0.0], vec![f64::INFINITY], upper),
+            (vec![f64::NEG_INFINITY, 0.0], vec![1.0, 1.0], lower),
+            (vec![f64::NAN], vec![1.0], lower),
+            (vec![0.0, 0.0], vec![1.0, f64::NAN], upper),
+            (vec![f64::NEG_INFINITY], vec![f64::INFINITY], lower),
+            (vec![-1e308], vec![1e308], apart),
+            (vec![0.0, 0.0], vec![1.0, 1.7e308], apart),
         ];
-        for (lower, upper) in bounds {
+        for (lower, upper, message) in cases {
             let mut pso: ParticleSwarm<_, f64, _> = ParticleSwarm::new((lower, upper), 4);
             let state: PopulationState<Particle<Vec<f64>, f64>, f64> = PopulationState::new();
             let res = pso.init(&mut Problem::new(TestProblem::new()), state);
