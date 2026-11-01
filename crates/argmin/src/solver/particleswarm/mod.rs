@@ -1034,6 +1034,13 @@ where
 
     /// Whether every particle is within `tol` times the size of the search box from the best
     /// position
+    ///
+    /// The L2 norm of the box overflows for bounds that `check_bounds` accepts, such as
+    /// `±1e200` in two dimensions. Then every vector is scaled by the smallest positive float,
+    /// a power of two, and next by the inverse of the norm of the scaled box. The box then has
+    /// a norm near 1, and the radius its share of it, so a small radius does not square to 0.
+    /// A position outside the box, which only a population given to `init` can have, can make
+    /// the radius infinite: then the stop does not fire.
     fn radius_converged(&self, state: &PopulationState<Particle<P, F>, F>) -> bool
     where
         P: ArgminL2Norm<F>,
@@ -1045,12 +1052,26 @@ where
             return false;
         };
         let (min, max) = &self.bounds;
-        let box_size = max.sub(min).l2_norm();
+        let width = max.sub(min);
+        let scaled = !width.l2_norm().is_finite();
+        let tiny = F::min_positive_value();
+        let inverse = if scaled {
+            float!(1.0) / width.mul(&tiny).l2_norm()
+        } else {
+            float!(1.0)
+        };
+        let norm = |x: &P| -> F {
+            if scaled {
+                x.mul(&tiny).mul(&inverse).l2_norm()
+            } else {
+                x.l2_norm()
+            }
+        };
         let radius = population
             .iter()
-            .map(|p| p.position.sub(&best.position).l2_norm())
+            .map(|p| norm(&p.position.sub(&best.position)))
             .fold(float!(0.0), F::max);
-        radius <= tol * box_size
+        radius <= tol * norm(&width)
     }
 
     /// Get current cognitive and social coefficients based on strategy
@@ -2438,6 +2459,43 @@ mod tests {
             assert!(distance <= 1e-6 * box_size);
         }
         assert!(best.iter().all(|x| x.abs() < 1e-4));
+    }
+
+    #[test]
+    fn the_radius_stop_does_not_overflow_with_wide_bounds() {
+        use rand::SeedableRng;
+        // The L2 norm of the box of these bounds overflows, so before the scaling every
+        // radius was within `tol` times an infinite box.
+        let pso = ParticleSwarm::new((vec![-1e200, -1e200], vec![1e200, 1e200]), 20)
+            .with_rng_generator(rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(42))
+            .with_radius_stop(1e-3)
+            .unwrap();
+
+        let state = run(pso, 5);
+
+        assert_eq!(
+            state.get_termination_reason(),
+            Some(&TerminationReason::MaxItersReached)
+        );
+        assert_eq!(state.get_iter(), 5);
+    }
+
+    #[test]
+    fn the_radius_stop_keeps_a_small_radius_in_a_wide_box() {
+        // The box has the norm 2.8e154, which overflows when squared, and the radius is
+        // 5e-10 of it. Scaled by the smallest positive float alone, the radius squares to 0.
+        let particle = |x: f64| Particle::new(vec![x, x], 0.0, vec![0.0, 0.0]);
+        let state: PopulationState<Particle<Vec<f64>, f64>, f64> = PopulationState::new()
+            .individual(particle(0.0))
+            .population(vec![particle(0.0), particle(1e145)]);
+        let swarm = |tol: f64| {
+            ParticleSwarm::<_, f64, _>::new((vec![-1e154, -1e154], vec![1e154, 1e154]), 2)
+                .with_radius_stop(tol)
+                .unwrap()
+        };
+
+        assert!(!swarm(1e-10).radius_converged(&state));
+        assert!(swarm(1e-9).radius_converged(&state));
     }
 
     #[test]
