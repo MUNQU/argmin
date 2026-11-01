@@ -1036,10 +1036,11 @@ where
     /// position
     ///
     /// The L2 norm of the box overflows for bounds that `check_bounds` accepts, such as
-    /// `±1e200` in two dimensions. Then both norms are taken of the vectors scaled by the
-    /// smallest positive float, a power of two: the ratio of the norms stays the same, and no
-    /// norm overflows. When the norm of the box is finite, so is the radius, because every
-    /// position is inside the box.
+    /// `±1e200` in two dimensions. Then every vector is scaled by the smallest positive float,
+    /// a power of two, and next by the inverse of the norm of the scaled box. The box then has
+    /// a norm near 1, and the radius its share of it, so a small radius does not square to 0.
+    /// A position outside the box, which only a population given to `init` can have, can make
+    /// the radius infinite: then the stop does not fire.
     fn radius_converged(&self, state: &PopulationState<Particle<P, F>, F>) -> bool
     where
         P: ArgminL2Norm<F>,
@@ -1052,18 +1053,25 @@ where
         };
         let (min, max) = &self.bounds;
         let width = max.sub(min);
-        let unscaled = width.l2_norm();
-        let scale = if unscaled.is_finite() {
-            float!(1.0)
+        let scaled = !width.l2_norm().is_finite();
+        let tiny = F::min_positive_value();
+        let inverse = if scaled {
+            float!(1.0) / width.mul(&tiny).l2_norm()
         } else {
-            F::min_positive_value()
+            float!(1.0)
         };
-        let box_size = width.mul(&scale).l2_norm();
+        let norm = |x: &P| -> F {
+            if scaled {
+                x.mul(&tiny).mul(&inverse).l2_norm()
+            } else {
+                x.l2_norm()
+            }
+        };
         let radius = population
             .iter()
-            .map(|p| p.position.sub(&best.position).mul(&scale).l2_norm())
+            .map(|p| norm(&p.position.sub(&best.position)))
             .fold(float!(0.0), F::max);
-        radius <= tol * box_size
+        radius <= tol * norm(&width)
     }
 
     /// Get current cognitive and social coefficients based on strategy
@@ -2470,6 +2478,24 @@ mod tests {
             Some(&TerminationReason::MaxItersReached)
         );
         assert_eq!(state.get_iter(), 5);
+    }
+
+    #[test]
+    fn the_radius_stop_keeps_a_small_radius_in_a_wide_box() {
+        // The box has the norm 2.8e154, which overflows when squared, and the radius is
+        // 5e-10 of it. Scaled by the smallest positive float alone, the radius squares to 0.
+        let particle = |x: f64| Particle::new(vec![x, x], 0.0, vec![0.0, 0.0]);
+        let state: PopulationState<Particle<Vec<f64>, f64>, f64> = PopulationState::new()
+            .individual(particle(0.0))
+            .population(vec![particle(0.0), particle(1e145)]);
+        let swarm = |tol: f64| {
+            ParticleSwarm::<_, f64, _>::new((vec![-1e154, -1e154], vec![1e154, 1e154]), 2)
+                .with_radius_stop(tol)
+                .unwrap()
+        };
+
+        assert!(!swarm(1e-10).radius_converged(&state));
+        assert!(swarm(1e-9).radius_converged(&state));
     }
 
     #[test]

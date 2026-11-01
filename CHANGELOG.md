@@ -29,8 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   must have the same, non-zero length.
 - The radius stop of `ParticleSwarm` no longer stops a run at its first
   iteration when the L2 norm of the box of its bounds overflows, such as for
-  `±1e200` in two dimensions. It then compares the norms of the vectors scaled
-  by the smallest positive float.
+  `±1e200` in two dimensions. It then scales every vector so that the box has
+  a norm near 1, and a small radius keeps its value.
 - `AugmentedLagrangianCost` scores its points in parallel only when the
   `parallelize` of its problem's `CostFunction` returns `true`, and its
   `bulk_cost` returns the error of the first failing point in the order of the
